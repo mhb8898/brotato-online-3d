@@ -25,6 +25,9 @@ const PLAYER_R = 14;
 const MAX_PARTS = 420;
 const MAX_FLOATS = 80;
 const MAX_PROJ_INST = 300;
+const MAX_ENEMY_INST = 220;   // per enemy type
+const MAX_MAT_INST = 200;     // material gems on the floor
+const MIN_DPR = 1;
 const OUTLINE_LIMIT = 34;
 const WALL_H = 42;
 const WALL_T = 26;
@@ -61,6 +64,40 @@ function roundRect(g, x, y, w, h, r) {
   g.closePath();
 }
 const damp = (dt, k) => 1 - Math.exp(-dt * k);
+
+/**
+ * Merge several coloured copies of unit geometries into one indexed geometry
+ * with a vertex colour attribute. Eyes, pupils and other trim then cost one
+ * draw call per entity type instead of one per piece per entity.
+ */
+function mergeGeos(parts) {
+  const pos = [], nor = [], col = [], idx = [];
+  let off = 0;
+  const c = new THREE.Color();
+  for (const part of parts) {
+    const g = part.geo.clone();
+    const sc = part.scale;
+    if (Array.isArray(sc)) g.scale(sc[0], sc[1], sc[2]); else g.scale(sc, sc, sc);
+    g.translate(part.pos[0], part.pos[1], part.pos[2]);
+    const pa = g.attributes.position.array, na = g.attributes.normal.array;
+    c.set(part.color);
+    for (let i = 0; i < pa.length; i += 3) {
+      pos.push(pa[i], pa[i + 1], pa[i + 2]);
+      nor.push(na[i], na[i + 1], na[i + 2]);
+      col.push(c.r, c.g, c.b);
+    }
+    const ia = g.index.array;
+    for (let i = 0; i < ia.length; i++) idx.push(ia[i] + off);
+    off += pa.length / 3;
+    g.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  out.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  out.setIndex(idx);
+  return out;
+}
 
 const PROJ_COLOR = {
   bullet: '#ffe9a8', pellet: '#ffb37a', laser: '#66f0ff', rocket: '#ff9f6b',
@@ -168,9 +205,15 @@ export class Renderer {
     this.og = ov.getContext('2d');
 
     // ---- three.js core
-    this.gl = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
+    // On high-density screens the extra pixels already hide edges, and MSAA
+    // on top of a 2x buffer is the single most expensive thing we could do.
+    this.maxDpr = Math.min(devicePixelRatio || 1, 2);
+    this.dprCur = this.maxDpr;
+    this.gl = new THREE.WebGLRenderer({ canvas, antialias: this.maxDpr < 1.5, alpha: false, powerPreference: 'high-performance' });
     this.gl.shadowMap.enabled = true;
-    this.gl.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.gl.shadowMap.type = THREE.PCFShadowMap;
+    // adaptive resolution: frame-time history drives dprCur between MIN_DPR and maxDpr
+    this.ftAcc = 0; this.ftN = 0; this.ftGood = 0; this.ftCooldown = 0;
     this.gl.toneMapping = THREE.ACESFilmicToneMapping;
     this.gl.toneMappingExposure = 1.15;
     this.gl.outputColorSpace = THREE.SRGBColorSpace;
@@ -209,14 +252,60 @@ export class Renderer {
     const dpr = Math.min(devicePixelRatio || 1, 2);
     const w = Math.max(1, this.c.clientWidth), h = Math.max(1, this.c.clientHeight);
     this.w = w; this.h = h; this.dpr = dpr;
-    this.gl.setPixelRatio(dpr);
+    this.maxDpr = dpr;
+    this.dprCur = Math.min(this.dprCur, dpr);
+    this.gl.setPixelRatio(this.dprCur);
     this.gl.setSize(w, h, false);
+    this.bakeVignette();
     this.camera.aspect = w / h;
     // Portrait phones see less to the side; pull the camera up to compensate.
     this.camOffset.set(0, 480, 310).multiplyScalar(this.camera.aspect < 1 ? 1.5 : this.camera.aspect < 1.4 ? 1.2 : 1);
     this.camera.updateProjectionMatrix();
     this.ov.width = Math.round(w * dpr);
     this.ov.height = Math.round(h * dpr);
+  }
+
+  /**
+   * Scale the 3D buffer to hold 60fps. A long frame is usually the GPU, and
+   * pixel count is the lever we can pull without touching the look of the
+   * text overlay, which always stays at native resolution.
+   */
+  adaptResolution(dt) {
+    if (dt > 0.08) return;               // a stall (tab switch, GC), not a trend
+    this.ftAcc += dt; this.ftN++;
+    if (this.ftAcc < 1) return;
+    const avg = this.ftAcc / this.ftN;
+    this.ftAcc = 0; this.ftN = 0;
+    if (this.ftCooldown > 0) { this.ftCooldown--; return; }
+    if (avg > 1 / 50 && this.dprCur > MIN_DPR) {
+      this.dprCur = Math.max(MIN_DPR, +(this.dprCur - 0.25).toFixed(2));
+      this.gl.setPixelRatio(this.dprCur);
+      this.ftGood = 0; this.ftCooldown = 1;
+    } else if (avg < 1 / 58 && this.dprCur < this.maxDpr) {
+      if (++this.ftGood >= 4) {
+        this.dprCur = Math.min(this.maxDpr, +(this.dprCur + 0.25).toFixed(2));
+        this.gl.setPixelRatio(this.dprCur);
+        this.ftGood = 0; this.ftCooldown = 2;
+      }
+    } else this.ftGood = 0;
+  }
+
+  /** The vignette is two static gradients; drawing them as images is ~free. */
+  bakeVignette() {
+    const W = Math.max(1, Math.round(this.w / 2)), H = Math.max(1, Math.round(this.h / 2));
+    const mk = (r, g, b, a) => {
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const x = c.getContext('2d');
+      const vg = x.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.42, W / 2, H / 2, Math.max(W, H) * 0.78);
+      vg.addColorStop(0, `rgba(${r},${g},${b},0)`);
+      vg.addColorStop(1, `rgba(${r},${g},${b},${a})`);
+      x.fillStyle = vg;
+      x.fillRect(0, 0, W, H);
+      return c;
+    };
+    this.vigBase = mk(0, 0, 0, 0.42);
+    this.vigDanger = mk(60, 0, 0, 0.6);
   }
 
   /** Screen (CSS px) -> world coords by casting a ray onto the ground plane. */
@@ -266,7 +355,7 @@ export class Renderer {
     sun.position.set(ARENA.w / 2 - 520, 1000, ARENA.h / 2 + 380);
     sun.target.position.set(ARENA.w / 2, 0, ARENA.h / 2);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.mapSize.set(1536, 1536);
     const sc = sun.shadow.camera;
     sc.left = -ARENA.w * 0.62; sc.right = ARENA.w * 0.62;
     sc.top = ARENA.h * 0.7; sc.bottom = -ARENA.h * 0.7;
@@ -333,36 +422,23 @@ export class Renderer {
     plinth.position.set(ARENA.w / 2, -35.5, ARENA.h / 2);
     this.scene.add(plinth);
 
-    // ---- walls
-    const stone = new THREE.MeshStandardMaterial({ color: '#2b3046', roughness: 0.85, metalness: 0.04 });
-    const cap = new THREE.MeshStandardMaterial({ color: '#3a4160', roughness: 0.7 });
+    // ---- walls: every block goes into one merged mesh (one draw call, one shadow pass)
+    const wallParts = [];
+    const block = (w, h, d, x, y, z, color) => wallParts.push({ geo: GEO.box, color, scale: [w, h, d], pos: [x, y, z] });
     const wall = (w, d, x, z) => {
-      const m = new THREE.Mesh(GEO.box, stone);
-      m.scale.set(w, WALL_H, d);
-      m.position.set(x, WALL_H / 2, z);
-      m.castShadow = true; m.receiveShadow = true;
-      this.scene.add(m);
-      const c = new THREE.Mesh(GEO.box, cap);
-      c.scale.set(w + 4, 5, d + 4);
-      c.position.set(x, WALL_H + 2.5, z);
-      c.castShadow = true;
-      this.scene.add(c);
+      block(w, WALL_H, d, x, WALL_H / 2, z, '#2b3046');
+      block(w + 4, 5, d + 4, x, WALL_H + 2.5, z, '#3a4160');
     };
     wall(ARENA.w + WALL_T * 2, WALL_T, ARENA.w / 2, -WALL_T / 2);
     wall(ARENA.w + WALL_T * 2, WALL_T, ARENA.w / 2, ARENA.h + WALL_T / 2);
     wall(WALL_T, ARENA.h, -WALL_T / 2, ARENA.h / 2);
     wall(WALL_T, ARENA.h, ARENA.w + WALL_T / 2, ARENA.h / 2);
-
-    // crenellations along the long walls
     for (let x = 40; x < ARENA.w; x += 80) {
-      for (const z of [-WALL_T / 2, ARENA.h + WALL_T / 2]) {
-        const m = new THREE.Mesh(GEO.box, stone);
-        m.scale.set(30, 14, WALL_T + 2);
-        m.position.set(x, WALL_H + 12, z);
-        m.castShadow = true;
-        this.scene.add(m);
-      }
+      for (const z of [-WALL_T / 2, ARENA.h + WALL_T / 2]) block(30, 14, WALL_T + 2, x, WALL_H + 12, z, '#2b3046');
     }
+    const walls = new THREE.Mesh(mergeGeos(wallParts), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.04 }));
+    walls.castShadow = true; walls.receiveShadow = true;
+    this.scene.add(walls);
 
     // ---- corner pillars with braziers
     const pillarMat = new THREE.MeshStandardMaterial({ color: '#343a55', roughness: 0.8 });
@@ -453,7 +529,11 @@ export class Renderer {
   buildPools() {
     const S = this.scene;
     this.playerPools = CHARACTERS.map((ch) => new Pool(S, () => this.makePlayer(ch)));
-    this.enemyPools = ENEMIES.map((def, i) => new Pool(S, () => this.makeEnemy(def, i)));
+    this.buildEnemyInstances();
+    this.haloPool = new Pool(S, () => {
+      const m = new THREE.Mesh(GEO.torus, this.glowMat('#ff3b6b', 0.8));
+      return m;
+    });
     this.windupPool = new Pool(S, () => {
       const g = new THREE.Group();
       const ring = new THREE.Mesh(GEO.ring, this.glowMat('#ff5050', 0.75));
@@ -471,14 +551,17 @@ export class Renderer {
       m.position.y = PLAYER_R * 0.9;
       return m;
     });
+    // material gems: one instanced mesh for the whole floor
+    this.gemInst = new THREE.InstancedMesh(GEO.octa, new THREE.MeshStandardMaterial({
+      color: '#5ee68f', emissive: '#2fbf6a', emissiveIntensity: 0.7, roughness: 0.25, metalness: 0.2,
+    }), MAX_MAT_INST);
+    this.gemInst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.gemInst.castShadow = true;
+    this.gemInst.frustumCulled = false;
+    this.gemInst.count = 0;
+    S.add(this.gemInst);
     this.pickupPools = [
-      new Pool(S, () => {
-        const m = new THREE.Mesh(GEO.octa, this.mat('mat', () => new THREE.MeshStandardMaterial({
-          color: '#5ee68f', emissive: '#2fbf6a', emissiveIntensity: 0.7, roughness: 0.25, metalness: 0.2,
-        })));
-        m.scale.set(6, 9, 6); m.castShadow = true;
-        return m;
-      }),
+      null,
       new Pool(S, () => {
         const g = new THREE.Group();
         const orb = new THREE.Mesh(GEO.sphere, this.mat('hp', () => new THREE.MeshStandardMaterial({
@@ -537,18 +620,17 @@ export class Renderer {
     body.position.y = 1.12;
     body.castShadow = true; body.receiveShadow = true;
     g.add(body);
-    // face: two eyes looking down +X
-    const eyeMat = this.mat('eye', () => new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.3 }));
-    const pupilMat = this.mat('pupil', () => new THREE.MeshBasicMaterial({ color: '#141421' }));
-    for (const s of [-1, 1]) {
-      const e = new THREE.Mesh(GEO.loSphere, eyeMat);
-      e.scale.setScalar(0.26);
-      e.position.set(0.78, 1.42, s * 0.34);
-      const p = new THREE.Mesh(GEO.loSphere, pupilMat);
-      p.scale.setScalar(0.13);
-      p.position.set(0.98, 1.44, s * 0.36);
-      g.add(e, p);
-    }
+    // face: two eyes looking down +X, merged into a single draw call
+    const face = new THREE.Mesh(
+      this.faceGeo || (this.faceGeo = mergeGeos([
+        { geo: GEO.loSphere, color: '#ffffff', scale: 0.26, pos: [0.78, 1.42, -0.34] },
+        { geo: GEO.loSphere, color: '#ffffff', scale: 0.26, pos: [0.78, 1.42, 0.34] },
+        { geo: GEO.loSphere, color: '#141421', scale: 0.13, pos: [0.98, 1.44, -0.36] },
+        { geo: GEO.loSphere, color: '#141421', scale: 0.13, pos: [0.98, 1.44, 0.36] },
+      ])),
+      this.mat('face', () => new THREE.MeshBasicMaterial({ vertexColors: true })),
+    );
+    g.add(face);
     // weapon held out front
     const w = WEAPONS[ch.weapon];
     const metal = this.mat('metal', () => new THREE.MeshStandardMaterial({ color: '#9aa3b8', roughness: 0.35, metalness: 0.8 }));
@@ -576,39 +658,45 @@ export class Renderer {
     return g;
   }
 
-  makeEnemy(def, type) {
-    const g = new THREE.Group();
-    const body = new THREE.Mesh(ENEMY_GEO[type] || GEO.sphere, this.bodyMat(def.color));
-    const sc = ENEMY_SCALE[type] || [1, 1, 1];
-    body.scale.set(sc[0], sc[1], sc[2]);
-    body.position.y = 1;
-    body.castShadow = true; body.receiveShadow = true;
-    g.add(body);
-    const eyeMat = this.mat('eeye', () => new THREE.MeshBasicMaterial({ color: '#fff4d0', fog: false }));
-    const pupilMat = this.mat('epupil', () => new THREE.MeshBasicMaterial({ color: '#2a0810' }));
-    const es = def.boss ? 0.16 : 0.22;
-    for (const s of [-1, 1]) {
-      const e = new THREE.Mesh(GEO.loSphere, eyeMat);
-      e.scale.setScalar(es);
-      e.position.set(0.72, 1.3, s * 0.36);
-      const p = new THREE.Mesh(GEO.loSphere, pupilMat);
-      p.scale.setScalar(es * 0.5);
-      p.position.set(0.9, 1.31, s * 0.37);
-      g.add(e, p);
-    }
-    if (def.boss) {
-      const halo = new THREE.Mesh(GEO.torus, this.glowMat(def.color, 0.8));
-      halo.position.y = 1;
-      g.add(halo);
-      g.userData.halo = halo;
-    }
-    if (type === 5) { // Exploder fuse
-      const fuse = new THREE.Mesh(GEO.loSphere, this.glowMat('#ffd166'));
-      fuse.scale.setScalar(0.25); fuse.position.set(0, 2.1, 0);
-      g.add(fuse);
-    }
-    g.userData.body = body; g.userData.def = def; g.userData.type = type;
-    return g;
+  /**
+   * Enemies are drawn with two InstancedMeshes per type: a lit body and an
+   * unlit face (eyes, pupils, fuse). Per-instance colour carries the elite
+   * tint and the hit flash, so a crowd of 200 costs ~20 draw calls.
+   */
+  buildEnemyInstances() {
+    this.enemyInst = ENEMIES.map((def, type) => {
+      const sc = ENEMY_SCALE[type] || [1, 1, 1];
+      const bodyGeo = (ENEMY_GEO[type] || GEO.sphere).clone();
+      bodyGeo.scale(sc[0], sc[1], sc[2]);
+      bodyGeo.translate(0, 1, 0);
+      const body = new THREE.InstancedMesh(bodyGeo, this.mat('ebody', () => new THREE.MeshStandardMaterial({
+        color: '#ffffff', roughness: 0.62, metalness: 0.05,
+      })), MAX_ENEMY_INST);
+      body.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      body.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_ENEMY_INST * 3), 3);
+      body.instanceColor.setUsage(THREE.DynamicDrawUsage);
+      body.castShadow = true; body.receiveShadow = true;
+      body.frustumCulled = false;
+      body.count = 0;
+
+      const es = def.boss ? 0.16 : 0.22;
+      const parts = [
+        { geo: GEO.loSphere, color: '#fff4d0', scale: es, pos: [0.72, 1.3, -0.36] },
+        { geo: GEO.loSphere, color: '#fff4d0', scale: es, pos: [0.72, 1.3, 0.36] },
+        { geo: GEO.loSphere, color: '#2a0810', scale: es * 0.5, pos: [0.9, 1.31, -0.37] },
+        { geo: GEO.loSphere, color: '#2a0810', scale: es * 0.5, pos: [0.9, 1.31, 0.37] },
+      ];
+      if (type === 5) parts.push({ geo: GEO.loSphere, color: '#ffd166', scale: 0.25, pos: [0, 2.1, 0] });
+      const face = new THREE.InstancedMesh(mergeGeos(parts), this.mat('eface', () => new THREE.MeshBasicMaterial({ vertexColors: true, fog: false })), MAX_ENEMY_INST);
+      face.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      face.frustumCulled = false;
+      face.count = 0;
+      this.scene.add(body, face);
+
+      const base = new THREE.Color(def.color);
+      const elite = base.clone().lerp(new THREE.Color('#ffc857'), 0.35).multiplyScalar(1.15);
+      return { body, face, base, elite, white: new THREE.Color('#ffffff') };
+    });
   }
 
   buildParticles() {
@@ -815,6 +903,7 @@ export class Renderer {
   draw(view, info, dt) {
     this.t += dt;
     this.dt = dt;
+    this.adaptResolution(dt);
     this.stepFx(dt);
 
     if (!view) view = this.menuView(dt);
@@ -937,21 +1026,36 @@ export class Renderer {
 
   // ------------------------------------------------------------- enemies
   syncEnemies(view) {
+    const inst = this.enemyInst;
+    for (const it of inst) it.n = 0;
+    const m = this._m, q = this._q, sc = this._s, pos = this._v;
+    const yAxis = this._v2.set(0, 1, 0);
     for (const e of view.enemies) {
       const type = ENEMIES[e.type] ? e.type : 0;
       const def = ENEMIES[type];
-      const g = this.enemyPools[type].get(e.id);
+      const it = inst[type];
+      if (it.n >= MAX_ENEMY_INST) continue;
       const elite = e.flags & 1, hit = e.flags & 2, windup = e.flags & 4;
       const r = def.r * (elite ? 1.5 : 1);
       const ph = this.t * (def.name === 'Swarmer' ? 22 : def.name === 'Runner' ? 12 : 6) + e.id * 1.7;
       const w = Math.sin(ph) * (def.name === 'Exploder' ? 0.08 : 0.045);
       const hop = def.name === 'Swarmer' || def.name === 'Runner' ? Math.abs(Math.sin(ph)) * r * 0.35 : 0;
-      g.position.set(e.x, hop, e.y);
-      g.rotation.set(0, -e.ang, 0);
-      g.scale.set(r * (1 + w), r * (1 - w), r * (1 + w));
-      g.userData.body.material = this.bodyMat(def.color, hit ? 'hit' : elite ? 'elite' : '');
-      if (g.userData.halo) { g.userData.halo.rotation.y = this.t * 1.3; g.userData.halo.rotation.x = Math.sin(this.t * 0.7) * 0.4; }
+      pos.set(e.x, hop, e.y);
+      q.setFromAxisAngle(yAxis, -e.ang);
+      sc.set(r * (1 + w), r * (1 - w), r * (1 + w));
+      m.compose(pos, q, sc);
+      it.body.setMatrixAt(it.n, m);
+      it.face.setMatrixAt(it.n, m);
+      it.body.setColorAt(it.n, hit ? it.white : elite ? it.elite : it.base);
+      it.n++;
 
+      if (def.boss) {
+        const halo = this.haloPool.get(e.id);
+        halo.material = this.glowMat(def.color, 0.8);
+        halo.position.set(e.x, r, e.y);
+        halo.scale.setScalar(r);
+        halo.rotation.set(Math.sin(this.t * 0.7) * 0.4, this.t * 1.3, 0);
+      }
       if (windup) {
         const wu = this.windupPool.get(e.id);
         wu.position.set(e.x, 0, e.y);
@@ -962,7 +1066,14 @@ export class Renderer {
         wu.userData.arrow.scale.set(28, 10, 10);
       }
     }
-    for (const pool of this.enemyPools) pool.sweep();
+    for (const it of inst) {
+      it.body.count = it.n; it.face.count = it.n;
+      if (it.n) {
+        it.body.instanceMatrix.needsUpdate = true; it.face.instanceMatrix.needsUpdate = true;
+        it.body.instanceColor.needsUpdate = true;
+      }
+    }
+    this.haloPool.sweep();
     this.windupPool.sweep();
   }
 
@@ -1021,15 +1132,29 @@ export class Renderer {
 
   // ------------------------------------------------------------- pickups
   syncPickups(view) {
+    const gem = this.gemInst;
+    let n = 0;
+    const m = this._m, q = this._q, sc = this._s.set(6, 9, 6), pos = this._v;
+    const yAxis = this._v2.set(0, 1, 0);
     for (const p of view.pickups) {
-      const type = p.type === 1 ? 1 : 0;
-      const m = this.pickupPools[type].get(p.id);
       const bob = Math.sin(this.t * 6 + p.id) * 2.5;
-      m.position.set(p.x, 10 + bob, p.y);
-      if (type === 0) m.rotation.y = this.t * 2 + p.id;
-      else { const pulse = 1 + Math.sin(this.t * 7 + p.id) * 0.08; m.scale.setScalar(pulse); m.rotation.y = -Math.atan2(this.camera.position.z - p.y, this.camera.position.x - p.x) + Math.PI / 2; }
+      if (p.type !== 1) {
+        if (n >= MAX_MAT_INST) continue;
+        pos.set(p.x, 10 + bob, p.y);
+        q.setFromAxisAngle(yAxis, this.t * 2 + p.id);
+        m.compose(pos, q, sc);
+        gem.setMatrixAt(n++, m);
+        continue;
+      }
+      const o = this.pickupPools[1].get(p.id);
+      o.position.set(p.x, 10 + bob, p.y);
+      const pulse = 1 + Math.sin(this.t * 7 + p.id) * 0.08;
+      o.scale.setScalar(pulse);
+      o.rotation.y = -Math.atan2(this.camera.position.z - p.y, this.camera.position.x - p.x) + Math.PI / 2;
     }
-    for (const pool of this.pickupPools) pool.sweep();
+    gem.count = n;
+    if (n) gem.instanceMatrix.needsUpdate = true;
+    this.pickupPools[1].sweep();
   }
 
   // ----------------------------------------------------- mesh particles
@@ -1170,11 +1295,12 @@ export class Renderer {
 
     // ---- vignette, reddening as the wave timer runs down
     const danger = info?.danger || 0;
-    const vg = g.createRadialGradient(this.w / 2, this.h / 2, Math.min(this.w, this.h) * 0.42, this.w / 2, this.h / 2, Math.max(this.w, this.h) * 0.78);
-    vg.addColorStop(0, 'rgba(0,0,0,0)');
-    vg.addColorStop(1, `rgba(${Math.round(40 * danger)},0,0,${0.42 + danger * 0.25})`);
-    g.fillStyle = vg;
-    g.fillRect(0, 0, this.w, this.h);
+    g.drawImage(this.vigBase, 0, 0, this.w, this.h);
+    if (danger > 0.01) {
+      g.globalAlpha = danger;
+      g.drawImage(this.vigDanger, 0, 0, this.w, this.h);
+      g.globalAlpha = 1;
+    }
 
     if (this.flash > 0) {
       g.fillStyle = `rgba(255,240,220,${this.flash * 0.3})`;
