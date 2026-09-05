@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-<title>Potato Royale - Online Arena Survival</title>
+<title>Potato Royale 3D - Online Arena Survival</title>
 <meta name="description" content="A browser co-op arena survival roguelite. Peer-to-peer over WebRTC, no server required.">
 <meta name="theme-color" content="#07080d">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥔</text></svg>">
@@ -11,6 +11,8 @@
 <!-- PeerJS provides only the WebRTC signalling handshake. Once peers are
      connected all game traffic is direct peer-to-peer. -->
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<!-- Three.js renders the arena. Pinned so a CDN bump can never break the game. -->
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }</script>
 </head>
 <body>
 <div id="app">
@@ -40,7 +42,7 @@
   <!-- ==================== Main menu ==================== -->
   <section id="menu" class="screen">
     <div class="menu-card">
-      <h1>POTATO <span>ROYALE</span></h1>
+      <h1>POTATO <span>ROYALE</span> <small class="threed">3D</small></h1>
       <p class="tag">Co-op arena survival. Peer-to-peer, no server, no install.</p>
 
       <div id="menuMain" class="menu-pane">

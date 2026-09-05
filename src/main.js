@@ -15,7 +15,7 @@
 import { World, TICK, PHASE } from './world.js';
 import { Host, Client, makeRoomCode, b64ToBytes } from './net.js';
 import { ClientState } from './clientstate.js';
-import { Renderer } from './render.js';
+import { Renderer } from './render3d.js';
 import { UI } from './ui.js';
 import {
   encodeSnapshot, decodeSnapshot, encodeInput, decodeInput, asView,

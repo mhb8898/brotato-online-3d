@@ -460,3 +460,7 @@ h1, h2, h3, h4 { line-height: 1.2; }
   font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #9fe8b5; white-space: nowrap; pointer-events: none;
 }
+
+/* 3D fork: overlay canvas for text sits between the WebGL canvas and the HUD. */
+#overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.menu-card h1 .threed { font-size: 0.42em; vertical-align: super; color: #7ec8ff; letter-spacing: 0.08em; }

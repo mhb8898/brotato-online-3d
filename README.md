@@ -1,4 +1,9 @@
-# Potato Royale
+# Potato Royale 3D
+
+> **This is the 3D fork** of [Potato Royale](https://github.com/mhb8898/brotato-online).
+> The simulation, netcode and HUD are unchanged; the arena is drawn with
+> [Three.js](https://threejs.org/) instead of Canvas 2D (see `src/render3d.js`).
+> Play it at https://mhb8898.github.io/brotato-online-3d/
 
 A browser co-op arena-survival roguelite in the spirit of **Brotato** — waves of
 enemies, auto-firing weapons, a shop between waves — but playable **online with
