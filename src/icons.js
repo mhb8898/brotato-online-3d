@@ -432,6 +432,49 @@ const GLYPH = {
     g.fillStyle = '#1a1206'; g.font = 'bold 0.9px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
     g.fillText('7', 0, 0.08);
   },
+  // ---- stat glyphs (no tile; drawn small next to a number)
+  burst(g, c) {
+    g.fillStyle = c;
+    g.beginPath();
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * TAU;
+      const rr = i % 2 ? 0.45 : 0.9;
+      const x = Math.cos(a) * rr, y = Math.sin(a) * rr;
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.closePath(); g.fill(); g.stroke();
+    g.fillStyle = '#fff'; g.beginPath(); g.arc(0, 0, 0.22, 0, TAU); g.fill();
+  },
+  bolt(g, c) {
+    g.fillStyle = c;
+    g.beginPath();
+    g.moveTo(0.15, -0.95); g.lineTo(-0.55, 0.1); g.lineTo(-0.05, 0.1); g.lineTo(-0.2, 0.95);
+    g.lineTo(0.55, -0.15); g.lineTo(0.05, -0.15); g.closePath(); g.fill(); g.stroke();
+  },
+  star(g, c) {
+    g.fillStyle = c;
+    g.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * TAU - Math.PI / 2;
+      const rr = i % 2 ? 0.4 : 0.92;
+      const x = Math.cos(a) * rr, y = Math.sin(a) * rr;
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.closePath(); g.fill(); g.stroke();
+  },
+  ruler(g, c) {
+    g.strokeStyle = c; g.lineWidth = 0.22; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(-0.85, 0); g.lineTo(0.85, 0); g.stroke();
+    g.beginPath(); g.moveTo(-0.85, 0); g.lineTo(-0.45, -0.38); g.moveTo(-0.85, 0); g.lineTo(-0.45, 0.38);
+    g.moveTo(0.85, 0); g.lineTo(0.45, -0.38); g.moveTo(0.85, 0); g.lineTo(0.45, 0.38); g.stroke();
+  },
+  sword(g, c) {
+    g.fillStyle = c;
+    g.beginPath(); g.moveTo(-0.7, 0.7); g.lineTo(0.55, -0.55); g.lineTo(0.85, -0.85); g.lineTo(0.55, -0.15); g.lineTo(-0.5, 0.9); g.closePath(); g.fill(); g.stroke();
+    g.strokeStyle = '#dfe5f2'; g.lineWidth = 0.2; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(-0.85, 0.25); g.lineTo(-0.25, 0.85); g.stroke();
+  },
+
 };
 
 const ITEM_GLYPH = {
@@ -443,6 +486,9 @@ const ITEM_GLYPH = {
   charm: 'clover', dice: 'die', jackpot: 'seven', sickle: 'sickle',
   scarf: 'ribbon', phantom: 'ghost', bandage: 'cross', fang: 'fang',
   barrel: 'tube', crown: 'crown',
+  // effect items
+  cactus: 'stone', adrenaline: 'cup', medkit: 'cross', piggy: 'seven', frag: 'flame',
+  frenzy: 'battery', executioner: 'fang', momentum: 'gear', ricochet: 'crosshair', alchemy: 'atom',
 };
 
 // -------------------------------------------------------------- icons
@@ -532,4 +578,63 @@ export function iconEl(kind, id, size = 96, lvl = 1, cls = 'icon') {
   c.className = cls;
   renderIcon(c, kind, id, lvl);
   return c;
+}
+
+// -------------------------------------------------------------- stat icons
+// One small glyph per stat, so a card can say "+4" next to a fist instead of
+// spelling out "Melee Damage +4" eight times over.
+const STAT_ICON = {
+  maxHp:     ['heart',     '#ff6b7a'],
+  hpRegen:   ['cross',     '#8dffb0'],
+  lifesteal: ['fang',      '#ff8fa3'],
+  armor:     ['shield',    '#c9a86a'],
+  dodge:     ['ghost',     '#7ec8ff'],
+  speed:     ['boot',      '#ffe66d'],
+  damage:    ['burst',     '#ff9f6b'],
+  melee:     ['fist',      '#ff8a5c'],
+  ranged:    ['crosshair', '#ffe9a8'],
+  elem:      ['flame',     '#c39bff'],
+  atkSpeed:  ['bolt',      '#ffd166'],
+  crit:      ['star',      '#ffc857'],
+  critMult:  ['die',       '#ffb347'],
+  range:     ['ruler',     '#a8ffd0'],
+  luck:      ['clover',    '#7ee081'],
+  harvest:   ['sickle',    '#d59bff'],
+  pickup:    ['magnet',    '#66f0ff'],
+  // non-stat glyphs used by weapon cards
+  dmg:       ['sword',     '#dfe9f5'],
+  dps:       ['burst',     '#ffd166'],
+};
+
+const statCache = new Map();
+
+/** Paint the glyph for stat `key` into `canvas`, no tile, cached per size. */
+export function renderStatIcon(canvas, key) {
+  const g = canvas.getContext('2d');
+  const size = canvas.width;
+  const ck = `${key}|${size}`;
+  let src = statCache.get(ck);
+  if (!src) {
+    src = document.createElement('canvas');
+    src.width = src.height = size;
+    const sg = src.getContext('2d');
+    const [name, color] = STAT_ICON[key] || ['die', '#dfe5f2'];
+    sg.save();
+    sg.translate(size / 2, size / 2);
+    const sc = size * 0.42;
+    sg.scale(sc, sc);
+    sg.lineJoin = 'round';
+    sg.strokeStyle = OUT;
+    sg.lineWidth = 0.1;
+    (GLYPH[name] || GLYPH.die)(sg, color, '#dfe5f2', false);
+    sg.restore();
+    statCache.set(ck, src);
+  }
+  g.clearRect(0, 0, size, size);
+  g.drawImage(src, 0, 0);
+}
+
+/** Paint every `<canvas class="sicon" data-stat>` under `root`. */
+export function paintStatIcons(root) {
+  root.querySelectorAll('canvas.sicon[data-stat]').forEach((c) => renderStatIcon(c, c.dataset.stat));
 }

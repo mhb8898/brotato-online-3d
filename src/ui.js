@@ -6,11 +6,13 @@
 
 import {
   CHARACTERS, WEAPONS, ITEMS, STAT_LABEL, STAT_PCT, BASE_STATS,
-  TIER_COLOR, TIER_NAME, MAX_WEAPONS, MAX_WEAPON_LVL, ROMAN,
+  TIER_COLOR, TIER_NAME, MAX_WEAPONS, MAX_WEAPON_LVL, ROMAN, MAX_WAVE,
+  CLASSES, SET_STEPS, DANGER, classCounts, setTier, waveDuration,
   weaponAt, weaponName, weaponDps,
 } from './data.js';
 import { renderPortrait } from './render.js';
-import { renderIcon } from './icons.js';
+import { renderIcon, paintStatIcons } from './icons.js';
+import * as progress from './progress.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, html) => {
@@ -45,19 +47,44 @@ function weaponTags(def) {
   return t;
 }
 
+/** Icon + number for one stat. The label lives in the tooltip. */
+function statChip(k, v, extra = '') {
+  const dir = v > 0 ? 'up' : v < 0 ? 'down' : '';
+  return `<span class="schip ${dir} ${extra}" title="${STAT_LABEL[k]} ${fmtStat(k, v)}">` +
+    `<canvas class="sicon" width="40" height="40" data-stat="${k}"></canvas><b>${fmtStat(k, v)}</b></span>`;
+}
+
+/** A row of stat chips from a mods object. */
+function modChips(mods, extra = '') {
+  return `<div class="chips ${extra}">${Object.entries(mods).map(([k, v]) => statChip(k, v)).join('')}</div>`;
+}
+
+/** Class chips for a weapon, with how many of that class you already own. */
+function classChips(id, owned) {
+  return WEAPONS[id].tags.map((t) => {
+    const c = CLASSES[t];
+    const n = owned ? (owned[t] || 0) : 0;
+    return `<span class="cls" style="color:${c.color};border-color:${c.color}55">${c.name}${owned ? ` <b>${n}</b>` : ''}</span>`;
+  }).join('');
+}
+
 /** The full stat block for one weapon at one level. */
-function weaponBody(id, lvl) {
+function weaponBody(id, lvl, owned) {
   const def = weaponAt(id, lvl);
   const tags = weaponTags(def).map((x) => `<span class="tag">${x}</span>`).join('');
+  const scales = [['melee', def.scale.m], ['ranged', def.scale.r], ['elem', def.scale.e]]
+    .filter(([, m]) => m)
+    .map(([k, m]) => `<span class="schip" title="${STAT_LABEL[k]} adds &times;${m}"><canvas class="sicon" width="40" height="40" data-stat="${k}"></canvas><b>&times;${m}</b></span>`)
+    .join('');
   return (
-    `<p class="wdesc">${WEAPONS[id].desc}</p>` +
-    `<div class="wstat">` +
-    `<span>${def.cls === 'melee' ? 'Melee' : 'Ranged'}</span>` +
-    `<span><b>${def.dmg}</b> dmg &times; <b>${(1 / def.cd).toFixed(1)}</b>/s ` +
-    `= <b>${Math.round(weaponDps(def))}</b> dps</span>` +
-    `<span><b>${def.range}</b> range</span>` +
-    `<span class="scale">Scales with ${scaleText(def)}</span>` +
+    `<div class="cls-row">${classChips(id, owned)}</div>` +
+    `<div class="wstat icons">` +
+    `<span class="schip" title="Damage per hit"><canvas class="sicon" width="40" height="40" data-stat="dmg"></canvas><b>${def.dmg}</b></span>` +
+    `<span class="schip" title="Attacks per second"><canvas class="sicon" width="40" height="40" data-stat="atkSpeed"></canvas><b>${(1 / def.cd).toFixed(1)}/s</b></span>` +
+    `<span class="schip" title="Range"><canvas class="sicon" width="40" height="40" data-stat="range"></canvas><b>${def.range}</b></span>` +
+    `<span class="schip dps" title="Damage per second"><canvas class="sicon" width="40" height="40" data-stat="dps"></canvas><b>${Math.round(weaponDps(def))}</b><small>dps</small></span>` +
     `</div>` +
+    (scales ? `<div class="chips scales" title="Scales with">${scales}</div>` : '') +
     (tags ? `<div class="tags">${tags}</div>` : '')
   );
 }
@@ -96,12 +123,20 @@ export class UI {
     $('btnReroll').onclick = () => c.onReroll();
     $('btnGo').onclick = () => c.onShopReady();
     $('btnAgain').onclick = () => c.onRestart();
+    $('btnContinue').onclick = () => c.onContinue();
     $('btnQuit').onclick = () => c.onLeave();
     $('btnMute').onclick = () => c.onMute();
 
     $('btnNetTest').onclick = () => c.onNetTest();
 
     $('nameInput').value = localStorage.getItem('pr_name') || '';
+    this.renderRecords();
+  }
+
+  renderRecords() {
+    const s = progress.summary();
+    $('records').classList.toggle('hidden', !s);
+    if (s) $('records').textContent = s;
   }
 
   // ------------------------------------------------------------- screens
@@ -140,25 +175,77 @@ export class UI {
     for (const ch of CHARACTERS) {
       const node = el('button', 'char');
       node.dataset.id = ch.id;
-      const mods = Object.entries(ch.mods)
-        .map(([k, v]) => `<div class="mod ${v > 0 ? 'up' : 'down'}"><span>${STAT_LABEL[k]}</span><b>${fmtStat(k, v)}</b></div>`)
-        .join('');
+      node.title = `${ch.desc}\nStarts with ${WEAPONS[ch.weapon].name}: ${WEAPONS[ch.weapon].desc}`;
       node.innerHTML =
+        `<span class="best-badge hidden"></span>` +
         `<canvas class="portrait" width="128" height="128"></canvas>` +
         `<h4>${ch.name}</h4><p>${ch.desc}</p>` +
-        `<div class="pill wpn" title="${WEAPONS[ch.weapon].desc}"><canvas class="icon xs" width="48" height="48"></canvas>${WEAPONS[ch.weapon].name}</div>` +
-        `<div class="mods">${mods}</div>` +
-        `<p class="starter">${WEAPONS[ch.weapon].desc}</p>`;
-      node.onclick = () => { this.selChar = ch.id; this.markChar(); this.cb.onChar(ch.id); };
+        `<div class="pill wpn"><canvas class="icon xs" width="48" height="48"></canvas>${WEAPONS[ch.weapon].name}</div>` +
+        modChips(ch.mods, 'center') +
+        `<div class="lock-veil"><b>&#128274;</b><span></span></div>`;
+      node.onclick = () => {
+        if (!progress.isUnlocked(ch.id)) { this.toast(`${ch.name}: ${progress.UNLOCKS[ch.id].hint}`, 'warn'); return; }
+        this.selChar = ch.id; this.markChar(); this.cb.onChar(ch.id);
+      };
       grid.appendChild(node);
       renderPortrait(node.querySelector('.portrait'), ch.id);
       renderIcon(node.querySelector('.icon'), 'weapon', ch.weapon);
+      paintStatIcons(node);
     }
+    this.refreshChars();
+  }
+
+  /** Lock state and best-wave badges, re-read from progress. Cheap, call often. */
+  refreshChars() {
+    for (const n of $('charGrid').children) {
+      const id = +n.dataset.id;
+      const locked = !progress.isUnlocked(id);
+      n.classList.toggle('locked', locked);
+      if (locked) n.querySelector('.lock-veil span').textContent = progress.UNLOCKS[id].hint;
+      const best = progress.bestWave(id);
+      const badge = n.querySelector('.best-badge');
+      badge.classList.toggle('hidden', !best);
+      if (best) {
+        badge.textContent = best > MAX_WAVE ? `Endless ${best}` : best >= MAX_WAVE ? 'Cleared' : `Wave ${best}`;
+        badge.classList.toggle('won', best >= MAX_WAVE);
+      }
+    }
+    if (!progress.isUnlocked(this.selChar)) { this.selChar = 0; this.cb.onChar?.(0); }
     this.markChar();
   }
 
   markChar() {
     for (const n of $('charGrid').children) n.classList.toggle('sel', +n.dataset.id === this.selChar);
+  }
+
+  /**
+   * Danger selector. Only the host can change it, and only up to one level
+   * above what they have beaten; everyone else sees the current pick.
+   */
+  renderDanger(danger, editable) {
+    const box = $('dangerOpts');
+    const maxD = progress.dangerUnlocked();
+    const key = `${danger}|${editable}|${maxD}`;
+    if (key !== this._dangerKey) {
+      this._dangerKey = key;
+      box.innerHTML = '';
+      DANGER.forEach((d, i) => {
+        const b = el('button', `dopt ${i === danger ? 'on' : ''} ${editable && i > maxD ? 'locked' : ''}`, String(i));
+        b.disabled = !editable;
+        b.title = editable && i > maxD ? `Beat ${DANGER[i - 1].name} to unlock` : d.desc;
+        b.onclick = () => { if (i <= maxD) this.cb.onDanger(i); };
+        box.appendChild(b);
+      });
+    }
+    $('dangerDesc').textContent = `${DANGER[danger].name}: ${DANGER[danger].desc}`
+      + (editable ? '' : ' (host picks)');
+  }
+
+  setDanger(danger, endless) {
+    const t = $('dangerTag');
+    const show = danger > 0 || endless;
+    t.classList.toggle('hidden', !show);
+    if (show) t.textContent = `${endless ? 'ENDLESS' : ''}${endless && danger > 0 ? ' · ' : ''}${danger > 0 ? `D${danger}` : ''}`;
   }
 
   setRoom(code, link) {
@@ -177,7 +264,7 @@ export class UI {
       li.innerHTML =
         `<span class="dot" style="background:${ch.color}"></span>` +
         `<span>${esc(p.name)}${pid === myPid ? ' <small style="color:#98a0b5">(you)</small>' : ''}</span>` +
-        `<span class="tick ${p.ready ? 'ok' : ''}">${p.ready ? 'READY' : 'picking…'}</span>`;
+        `<span class="tick ${p.ready ? 'ok' : ''}">${p.connected === false ? 'away' : p.ready ? 'READY' : 'picking…'}</span>`;
       list.appendChild(li);
     }
     const me = roster.get(myPid);
@@ -189,7 +276,7 @@ export class UI {
   updateHud(view, you, roster, pid) {
     if (!view) return;
     $('waveNum').textContent = view.wave || 1;
-    const dur = Math.min(50, 18 + (view.wave || 1) * 2);
+    const dur = waveDuration(view.wave || 1);
     const frac = Math.max(0, Math.min(1, view.timeLeft / dur));
     $('timerFill').style.width = `${frac * 100}%`;
     $('timerFill').style.background = frac < 0.25
@@ -229,9 +316,10 @@ export class UI {
       if (!info) continue;
       const ch = CHARACTERS[info.char] || CHARACTERS[0];
       const down = p.flags & 1;
+      const away = info.connected === false;
       html +=
-        `<div class="team-row ${down ? 'down' : ''}">` +
-        `<div class="nm"><span class="dot" style="background:${ch.color}"></span>${esc(info.name)}</div>` +
+        `<div class="team-row ${down || away ? 'down' : ''}" title="${away ? 'Disconnected' : ''}">` +
+        `<div class="nm"><span class="dot" style="background:${ch.color}"></span>${esc(info.name)}${away ? ' <small>away</small>' : ''}</div>` +
         `<div class="bar"><i style="width:${down ? 100 : Math.round(Math.max(0, (p.hp / p.maxHp) * 100))}%"></i></div></div>`;
     }
     // Reparsing this every frame forced a full layout 60x a second for nothing.
@@ -245,6 +333,12 @@ export class UI {
   }
 
   // --------------------------------------------------------------- shop
+  setShopSummary(wave, s) {
+    $('shopSummary').textContent = s
+      ? `Wave ${wave}: ${s.kills} kills · +${s.mats} materials · ${s.dmg} damage taken`
+      : '';
+  }
+
   renderShop(shop, you, wave, timeLeft, roster, myPid) {
     $('shopNext').textContent = wave + 1;
     $('shopMats').textContent = you ? you.mats : 0;
@@ -271,6 +365,7 @@ export class UI {
 
     const box = $('offers');
     box.innerHTML = '';
+    const owned = classCounts(you.weapons);
     shop.offers.forEach((o, i) => {
       const card = el('div', `offer ${o?.sold ? 'sold' : ''}`);
       if (!o) { box.appendChild(card); return; }
@@ -281,15 +376,22 @@ export class UI {
       const merges = o.kind === 'weapon' && you.weapons.some((w) => w.id === o.id && w.lvl === 1);
       let body;
       if (o.kind === 'weapon') {
-        body = weaponBody(o.id, 1);
+        body = weaponBody(o.id, 1, owned);
         if (merges) {
           body += `<div class="merge">Combines with your ${WEAPONS[o.id].name}` +
             ` &rarr; <b>${weaponName(o.id, 2)}</b></div>`;
+        } else {
+          // Say out loud when this purchase completes a set.
+          const next = WEAPONS[o.id].tags.find((t) => SET_STEPS.includes((owned[t] || 0) + 1));
+          if (next) {
+            const c = CLASSES[next];
+            const tier = setTier((owned[next] || 0) + 1);
+            body += `<div class="merge">Completes <b>${c.name} ${SET_STEPS[tier]}</b>: ${STAT_LABEL[c.stat]} ${fmtStat(c.stat, c.steps[tier])}</div>`;
+          }
         }
       } else {
-        body = `<div class="mods">${Object.entries(o.mods)
-          .map(([k, v]) => `<div class="mod ${v > 0 ? 'up' : 'down'}"><span>${STAT_LABEL[k]}</span><b>${fmtStat(k, v)}</b></div>`)
-          .join('')}</div>`;
+        body = (o.desc ? `<p class="wdesc effect">${o.desc}</p>` : '') +
+          (o.mods ? modChips(o.mods, 'big') : '');
       }
 
       const afford = you.mats >= o.price;
@@ -305,7 +407,9 @@ export class UI {
         `<h4>${o.name}</h4></div></div>${body}` +
         `<button class="btn buy ${afford && !o.sold && !full ? 'primary' : ''}" ${o.sold || !afford || full ? 'disabled' : ''}>` +
         `${o.sold ? 'Bought' : full ? 'Slots full' : merges ? `Combine ${o.price}` : `Buy ${o.price}`}</button>`;
+      if (o.kind === 'weapon') card.title = WEAPONS[o.id].desc;
       renderIcon(card.querySelector('.icon'), o.kind, o.id);
+      paintStatIcons(card);
       card.querySelector('.lock').onclick = () => this.cb.onLock(i);
       card.querySelector('.buy').onclick = () => this.cb.onBuy(i);
       box.appendChild(card);
@@ -316,6 +420,22 @@ export class UI {
   }
 
   renderInventory(you) {
+    // Class progress: which sets you are building and how far along each is.
+    const owned = classCounts(you.weapons);
+    $('classRow').innerHTML = Object.keys(CLASSES)
+      .filter((t) => owned[t])
+      .sort((a, b) => owned[b] - owned[a])
+      .map((t) => {
+        const c = CLASSES[t];
+        const n = owned[t];
+        const tier = setTier(n);
+        const next = SET_STEPS.find((s) => s > n);
+        const bonus = tier >= 0 ? `${STAT_LABEL[c.stat]} ${fmtStat(c.stat, c.steps[tier])}` : `next at ${next}`;
+        return `<span class="cls ${tier >= 0 ? 'on' : ''}" style="color:${c.color};border-color:${c.color}66" ` +
+          `title="${SET_STEPS.map((s, i) => `${s}: ${STAT_LABEL[c.stat]} ${fmtStat(c.stat, c.steps[i])}`).join('\n')}">` +
+          `${c.name} <b>${n}${next ? `/${next}` : ''}</b><small>${bonus}</small></span>`;
+      }).join('') || '<span class="empty">Own two weapons of one class for a set bonus.</span>';
+
     const wbox = $('invWeapons');
     wbox.innerHTML = '';
     you.weapons.forEach((w, i) => {
@@ -325,7 +445,7 @@ export class UI {
       row.innerHTML =
         `<canvas class="icon sm" width="72" height="72"></canvas>` +
         `<span class="wname">${WEAPONS[w.id].name}${w.lvl > 1 ? ` <b class="lvl">${ROMAN[w.lvl - 1]}</b>` : ''}` +
-        `<small>${def.dmg} dmg &middot; ${(1 / def.cd).toFixed(1)}/s &middot; ${Math.round(weaponDps(def))} dps</small></span>` +
+        `<small>${Math.round(weaponDps(def))} dps &middot; ${def.range} range</small></span>` +
         `<button class="btn tiny sell" ${you.weapons.length <= 1 ? 'disabled' : ''}>Sell ${w.sell}</button>`;
       row.title = `${WEAPONS[w.id].desc}\nScales with ${scaleText(def).replace(/&times;/g, 'x').replace(/&middot;/g, ',')}`
         + (dupe && w.lvl < MAX_WEAPON_LVL ? '\nYou own two of these - they will combine.' : '');
@@ -341,11 +461,13 @@ export class UI {
       const def = ITEMS.find((x) => x.id === it.id);
       const row = el('div', 'inv-row');
       row.innerHTML =
-        `<canvas class="icon sm" width="72" height="72"></canvas><span>${it.name}</span>` +
+        `<canvas class="icon sm" width="72" height="72"></canvas>` +
+        `<span class="wname">${it.name}${it.desc ? `<small>${it.desc}</small>` : (it.mods ? modChips(it.mods, 'mini') : '')}</span>` +
         `<button class="btn tiny sell">Sell ${Math.floor((def?.price || 10) * 0.5)}</button>`;
-      row.title = Object.entries(it.mods || {})
+      row.title = (it.desc ? `${it.desc}\n` : '') + Object.entries(it.mods || {})
         .map(([k, v]) => `${STAT_LABEL[k]} ${fmtStat(k, v)}`).join('\n');
       renderIcon(row.querySelector('.icon'), 'item', it.id);
+      paintStatIcons(row);
       row.querySelector('.sell').onclick = () => this.cb.onSell('item', i);
       ibox.appendChild(row);
     });
@@ -358,12 +480,14 @@ export class UI {
       const v = you.stats[k];
       if (v === BASE_STATS[k] && v === 0) continue;   // hide untouched zero stats
       const d = el('div');
+      d.title = STAT_LABEL[k];
       const cls = v > BASE_STATS[k] ? 'up' : v < BASE_STATS[k] ? 'down' : '';
       const shown = k === 'hpRegen' ? `${v.toFixed(1)}/s`
         : STAT_PCT.has(k) ? `${Math.round(v)}%` : Math.round(v);
-      d.innerHTML = `<span>${STAT_LABEL[k]}</span><b class="${cls}">${shown}</b>`;
+      d.innerHTML = `<canvas class="sicon" width="40" height="40" data-stat="${k}"></canvas><b class="${cls}">${shown}</b>`;
       box.appendChild(d);
     }
+    paintStatIcons(box);
   }
 
   // ----------------------------------------------------------- level up
@@ -378,18 +502,28 @@ export class UI {
     msg.options.forEach((o, i) => {
       const [k, v] = Object.entries(o.mods)[0];
       const b = el('button', 'lu-opt');
-      b.innerHTML = `<span class="k">${STAT_LABEL[k]}</span><span class="v">${fmtStat(k, v)}</span>`;
+      b.title = STAT_LABEL[k];
+      b.innerHTML = `<canvas class="sicon" width="64" height="64" data-stat="${k}"></canvas>` +
+        `<span class="v">${fmtStat(k, v)}</span><span class="k">${STAT_LABEL[k]}</span>`;
       b.onclick = () => this.cb.onPick(i);
       opts.appendChild(b);
     });
+    paintStatIcons(opts);
   }
 
   // ---------------------------------------------------------- game over
-  renderOver(msg, canRestart) {
-    $('overTitle').textContent = msg.win ? 'You survived!' : 'Wiped out';
+  renderOver(msg, canRestart, opts = {}) {
+    const endless = !!msg.endless;
+    $('overTitle').textContent = msg.win ? (endless && !msg.canContinue ? 'Endless run over' : 'You survived!') : 'Wiped out';
     $('overSub').textContent = msg.win
-      ? `All ${msg.wave} waves cleared.`
+      ? (endless && !msg.canContinue
+        ? `The squad held out until wave ${msg.wave}.`
+        : `All ${msg.wave} waves cleared${msg.danger > 0 ? ` on ${DANGER[msg.danger].name}` : ''}.`)
       : `The squad went down on wave ${msg.wave}.`;
+    $('overBest').classList.toggle('hidden', !opts.newBest);
+    if (opts.newBest) $('overBest').textContent = 'New personal best!';
+    $('btnContinue').classList.toggle('hidden', !opts.canContinue);
+    $('btnAgain').classList.toggle('primary', !opts.canContinue);
     const list = $('scoreList');
     list.innerHTML = '';
     for (const s of msg.scores || []) {

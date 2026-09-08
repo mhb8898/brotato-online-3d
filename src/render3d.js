@@ -574,6 +574,20 @@ export class Renderer {
         g.add(orb, a, b);
         return g;
       }),
+      // boss loot crate: a big gold gem with a slow halo, unmistakable on the floor
+      new Pool(S, () => {
+        const g = new THREE.Group();
+        const gem = new THREE.Mesh(GEO.octa, this.mat('crate', () => new THREE.MeshStandardMaterial({
+          color: '#ffc857', emissive: '#ff9f1c', emissiveIntensity: 0.9, roughness: 0.2, metalness: 0.4,
+        })));
+        gem.scale.set(13, 19, 13); gem.castShadow = true;
+        const halo = new THREE.Mesh(GEO.ring, this.mat('crateHalo', () => new THREE.MeshBasicMaterial({
+          color: '#ffd68a', transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+        })));
+        halo.scale.set(34, 1, 34); halo.position.y = -8;
+        g.add(gem, halo);
+        return g;
+      }),
     ];
     // ring / glow / beam mesh particles
     this.ringPool = new Pool(S, () => {
@@ -1138,6 +1152,13 @@ export class Renderer {
     const yAxis = this._v2.set(0, 1, 0);
     for (const p of view.pickups) {
       const bob = Math.sin(this.t * 6 + p.id) * 2.5;
+      if (p.type === 2) {
+        const o = this.pickupPools[2].get(p.id);
+        o.position.set(p.x, 22 + bob * 2, p.y);
+        o.rotation.y = this.t * 1.2;
+        o.children[1].rotation.y = -this.t * 0.7;
+        continue;
+      }
       if (p.type !== 1) {
         if (n >= MAX_MAT_INST) continue;
         pos.set(p.x, 10 + bob, p.y);
@@ -1155,6 +1176,7 @@ export class Renderer {
     gem.count = n;
     if (n) gem.instanceMatrix.needsUpdate = true;
     this.pickupPools[1].sweep();
+    this.pickupPools[2].sweep();
   }
 
   // ----------------------------------------------------- mesh particles

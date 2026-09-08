@@ -14,6 +14,22 @@
 
 import { World, TICK, PHASE } from './world.js';
 import { Host, Client, makeRoomCode, b64ToBytes } from './net.js';
+
+// Where a client keeps "I was pid N in room X" so a refresh can rejoin the
+// same run. sessionStorage is per tab on purpose: a host and a client open in
+// two tabs of one browser must not overwrite each other.
+const SESSION_KEY = 'pr_session';
+const SESSION_TTL_MS = 20 * 60 * 1000;
+function loadSession() {
+  try {
+    const s = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+    if (!s || !s.code || !s.pid || !s.token) return null;
+    if (Date.now() - (s.at || 0) > SESSION_TTL_MS) return null;
+    return s;
+  } catch { return null; }
+}
+function saveSession(s) { try { sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, at: Date.now() })); } catch { /* noop */ } }
+function clearSession() { try { sessionStorage.removeItem(SESSION_KEY); } catch { /* noop */ } }
 import { ClientState } from './clientstate.js';
 import { Renderer } from './render3d.js';
 import { UI } from './ui.js';
@@ -23,7 +39,8 @@ import {
 } from './protocol.js';
 import { INPUT_HZ } from './config.js';
 import { sfx, unlock, setMuted } from './audio.js';
-import { ARENA } from './data.js';
+import { waveDuration } from './data.js';
+import * as progress from './progress.js';
 
 const MODE = { MENU: 0, SOLO: 1, HOST: 2, CLIENT: 3 };
 
@@ -105,7 +122,7 @@ class Game {
     this.lastHp = null;
     this.lastPickSfx = 0;
     this.keys = new Set();
-    this.mouse = { x: ARENA.w / 2, y: 0, active: false };
+    this.lastAim = 0;   // facing persists while standing still
     this.touch = null;
     this.muted = false;
     // Press P for a live cost breakdown. The only honest way to find a stutter
@@ -120,6 +137,12 @@ class Game {
     if (room) {
       document.getElementById('codeInput').value = room.toUpperCase().slice(0, 5);
       this.ui.pane('menuJoin');
+    }
+    // A refresh mid-game: go straight back into the run we were in.
+    const session = loadSession();
+    if (session) {
+      document.getElementById('codeInput').value = session.code;
+      setTimeout(() => this.startClient(session.code, session), 300);
     }
 
     this.last = performance.now();
@@ -166,6 +189,8 @@ class Game {
       onLock: (slot) => this.sendControl({ t: 'lock', slot }),
       onPick: (idx) => { sfx.buy(); this.sendControl({ t: 'levelpick', idx }); },
       onRestart: () => this.sendControl({ t: 'restart' }),
+      onDanger: (v) => this.sendControl({ t: 'danger', v }),
+      onContinue: () => { unlock(); this.sendControl({ t: 'continue' }); },
       onCopyLink: () => this.copyLink(),
       onNetTest: async () => {
         this.ui.netTest('running');
@@ -185,7 +210,7 @@ class Game {
       if (pid === null) { this.onControl(msg); this.host?.sendControl(null, msg); }
       else if (pid === LOCAL_PID) this.onControl(msg);
       else this.host?.sendControl(pid, msg);
-    });
+    }, LOCAL_PID);
     this.world.addPlayer(LOCAL_PID, this.ui.playerName);
     this.world.onControl(LOCAL_PID, { t: 'char', id: this.ui.selChar });
   }
@@ -214,11 +239,21 @@ class Game {
         sfx.join();
         this.ui.toast(`${name} joined`);
       },
+      onRejoin: (pid, name) => {
+        if (!this.world?.rejoinPlayer(pid)) {
+          // The run they were in is gone (host went back to the lobby): seat them fresh.
+          this.world?.addPlayer(pid, name);
+          this.world?.pushYou(this.world.players.get(pid));
+        }
+        sfx.join();
+        this.ui.toast(`${name} reconnected`, 'good');
+      },
       onLeave: (pid) => {
         const p = this.world?.players.get(pid);
         this.world?.removePlayer(pid);
         sfx.leave();
-        this.ui.toast(`${p?.name || 'A player'} left`, 'warn');
+        const midRun = this.world && this.world.phase !== PHASE.LOBBY;
+        this.ui.toast(`${p?.name || 'A player'} ${midRun ? 'disconnected - they can refresh to rejoin' : 'left'}`, 'warn');
       },
       onControl: (pid, msg) => this.world?.onControl(pid, msg),
       onInput: (pid, data) => {
@@ -249,11 +284,13 @@ class Game {
     this.ui.screen('lobby');
   }
 
-  async startClient(code) {
+  /** @param rejoin { pid, token } to reclaim a slot after a refresh or a drop */
+  async startClient(code, rejoin = null) {
     unlock();
     if (!/^[A-Z0-9]{5}$/.test(code)) { this.ui.joinError('Room codes are 5 characters.'); return; }
     this.teardownNet();
-    this.ui.connecting(`Connecting to ${code}…`);
+    this.ui.screen('menu');
+    this.ui.connecting(rejoin ? `Rejoining ${code}…` : `Connecting to ${code}…`);
 
     this.client = new Client(code, this.ui.playerName, {
       onControl: (msg) => this.onControl(msg),
@@ -263,27 +300,46 @@ class Game {
       },
       onStatus: (t, k) => this.ui.toast(t, k),
       onStage: (t) => this.ui.connecting(t),
-      onClose: () => {
-        this.ui.toast('Host closed the game.', 'bad');
-        this.teardown();
-      },
-    });
+      onClose: () => this.onLinkLost(code),
+    }, rejoin);
 
     try {
       await this.client.start();
     } catch (err) {
       this.client = null;
       this.ui.joinError(err.message || 'Connection failed.');
+      if (rejoin) this.ui.toast('Could not rejoin - the host may have closed the room.', 'bad');
       return;
     }
 
     this.mode = MODE.CLIENT;
     this.state.reset();
     this.state.pid = this.client.pid;
+    saveSession({ code, pid: this.client.pid, token: this.client.token });
     this.ui.setRoom(code, this.linkFor(code));
     this.ui.setLobbySub('Connected. Pick a character and hit Ready.');
     this.ui.screen('lobby');
-    this.sendControl({ t: 'char', id: this.ui.selChar });
+    // A rejoin is told which screen it is on by the host; a fresh join picks a character.
+    if (!this.client.rejoined) this.sendControl({ t: 'char', id: this.ui.selChar });
+  }
+
+  /**
+   * The link to the host dropped. The host keeps our slot, so try once to get
+   * back in on our own before handing the decision to the player.
+   */
+  onLinkLost(code) {
+    const session = loadSession();
+    this.teardownNet();
+    this.mode = MODE.MENU;
+    this.state.reset();
+    this.ui.screen('menu');
+    if (session && session.code === code) {
+      this.ui.toast('Connection lost - trying to rejoin…', 'warn');
+      setTimeout(() => this.startClient(code, session), 1500);
+    } else {
+      this.ui.toast('Host closed the game.', 'bad');
+      this.teardown();
+    }
   }
 
   teardownNet() {
@@ -293,6 +349,7 @@ class Game {
   }
 
   teardown() {
+    clearSession();   // leaving on purpose: nothing to come back to
     this.teardownNet();
     this.mode = MODE.MENU;
     this.state.reset();
@@ -336,6 +393,8 @@ class Game {
         for (const p of msg.players) next.set(p.id, p);
         this.state.roster = next;
         this.ui.renderPlayers(next, this.myPid);
+        this.danger = msg.danger | 0;
+        this.ui.renderDanger(this.danger, msg.host === this.myPid && msg.phase === PHASE.LOBBY);
         if (msg.phase === PHASE.LOBBY) {
           this.ui.screen('lobby');
           this.ui.renderLevelup(null);
@@ -368,20 +427,32 @@ class Game {
         this.levelMsg = null;
         this.ui.renderLevelup(null);
         this.ui.screen('game');
+        this.ui.setDanger(msg.danger | 0, !!msg.endless);
         this.ui.toast(msg.boss ? `Wave ${msg.wave} - BOSS` : `Wave ${msg.wave}`, msg.boss ? 'warn' : '');
         if (msg.boss) sfx.boss(); else sfx.wave();
+        // Reaching a wave is what counts, so a closed tab still keeps the record.
+        this.recordProgress({ wave: msg.wave, danger: msg.danger | 0 });
         break;
       case 'shopopen':
         this.ui.screen('shop');
         this.ui.lastShopKey = '';
+        this.ui.setShopSummary(msg.wave, msg.summary);
         sfx.shop();
         break;
-      case 'over':
+      case 'over': {
         this.overMsg = msg;
-        this.ui.renderOver(msg, true);
+        const best = progress.bestWave(this.myChar);
+        // The run and the win were counted when wave 20 fell; an endless
+        // wipe only moves the best-wave record.
+        this.recordProgress({ wave: msg.wave, danger: msg.danger | 0, win: msg.win, over: !msg.endless });
+        this.ui.renderOver(msg, true, {
+          canContinue: !!msg.canContinue && this.isSim,
+          newBest: msg.wave > best,
+        });
         this.ui.screen('over');
         if (msg.win) sfx.win(); else sfx.over();
         break;
+      }
       case 'down':
         if (msg.id === this.myPid) { this.ui.toast('You are down - back up at the shop', 'bad'); }
         else this.ui.toast(`${msg.name} went down`, 'warn');
@@ -393,6 +464,14 @@ class Game {
         break;
       default: break;
     }
+  }
+
+  get myChar() { return this.state.you?.char ?? this.ui.selChar; }
+
+  recordProgress(o) {
+    const unlocked = progress.record({ char: this.myChar, ...o });
+    for (const u of unlocked) { this.ui.toast(u, 'good'); sfx.level(); }
+    if (unlocked.length || o.over) { this.ui.refreshChars(); this.ui.renderRecords(); }
   }
 
   onFx(list) {
@@ -440,11 +519,6 @@ class Game {
     addEventListener('keyup', (e) => this.keys.delete(keyToken(e)));
     addEventListener('blur', () => this.keys.clear());
 
-    addEventListener('mousemove', (e) => {
-      const r = canvas.getBoundingClientRect();
-      const w = this.renderer.toWorld(e.clientX - r.left, e.clientY - r.top);
-      this.mouse.x = w.x; this.mouse.y = w.y; this.mouse.active = true;
-    });
     canvas.addEventListener('mousedown', () => unlock());
 
     // -------- touch: left half drives a virtual stick, aim follows movement
@@ -487,13 +561,10 @@ class Game {
     if (k.has('KeyS') || k.has('ArrowDown')) my += 1;
     if (this.touch) { mx += this.touch.dx; my += this.touch.dy; }
 
-    const pos = this.state.predictedPos(performance.now());
-    let aim;
-    if (this.touch && (this.touch.dx || this.touch.dy)) aim = Math.atan2(this.touch.dy, this.touch.dx);
-    else if (this.mouse.active) aim = Math.atan2(this.mouse.y - pos.y, this.mouse.x - pos.x);
-    else aim = Math.atan2(my, mx || 0.0001);
-
-    return { seq: ++this.seq, mx, my, aim };
+    // You face the way you move. Weapons pick their own targets, so aiming
+    // was a second job the mouse did not need to have.
+    if (mx || my) this.lastAim = Math.atan2(my, mx);
+    return { seq: ++this.seq, mx, my, aim: this.lastAim };
   }
 
   // =========================================================================
@@ -557,7 +628,7 @@ class Game {
     const view = this.state.sample(performance.now());
     const info = { pid: this.myPid, roster: this.state.roster, danger: 0 };
     if (view && view.phase === PHASE.WAVE) {
-      const dur = Math.min(50, 18 + view.wave * 2);
+      const dur = waveDuration(view.wave);
       info.danger = 1 - Math.max(0, Math.min(1, view.timeLeft / dur));
     }
     const tDraw = this.perf.on ? performance.now() : 0;

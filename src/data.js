@@ -6,8 +6,27 @@
 
 export const ARENA = { w: 1600, h: 900 };
 
-export const MAX_WAVE = 20;
+export const MAX_WAVE = 20;        // clearing this wave is the win; endless continues past it
+export const HARD_WAVE_CAP = 99;   // the snapshot carries the wave as a u8
 export const MAX_WEAPONS = 6;
+
+/** Seconds a wave lasts. 21s on wave 1, 60s from wave 14 on. */
+export function waveDuration(n) { return Math.min(60, 18 + 3 * n); }
+
+/** Bosses on a boss wave: one, two at wave 20, one more per ten endless waves. */
+export function bossCountForWave(w) {
+  if (w < 20) return 1;
+  return 2 + Math.floor((w - 20) / 10);
+}
+
+// Danger is picked by the host in the lobby. Harder is also richer: the
+// harvest bonus keeps the shop moving when enemies take longer to die.
+export const DANGER = [
+  { name: 'Danger 0', hp: 1,   dmg: 1,    spawn: 1,    elite: 0,    harvest: 0,  desc: 'The standard run.' },
+  { name: 'Danger 1', hp: 1.3, dmg: 1.15, spawn: 1.12, elite: 0.04, harvest: 10, desc: 'Tougher enemies, a few more elites.' },
+  { name: 'Danger 2', hp: 1.6, dmg: 1.3,  spawn: 1.25, elite: 0.08, harvest: 20, desc: 'Denser waves. Armor stops being optional.' },
+  { name: 'Danger 3', hp: 2,   dmg: 1.5,  spawn: 1.4,  elite: 0.12, harvest: 30, desc: 'Everything hits like a truck.' },
+];
 
 // Every stat a player can have. Percent-based unless noted.
 export const BASE_STATS = {
@@ -102,6 +121,59 @@ export const WEAPONS = {
 export const WEAPON_IDS = Object.keys(WEAPONS);
 
 // --------------------------------------------------------------------------
+// Weapon classes. Every weapon belongs to one or two; owning 2 / 4 / 6
+// weapons of a class grants that class's set bonus. This is what turns "six
+// random guns" into a build: the shop card tells you which class a weapon
+// feeds, and the inventory shows how close you are to the next tier.
+// --------------------------------------------------------------------------
+const WEAPON_TAGS = {
+  knife: ['blade', 'precise'], sword: ['blade'], spear: ['blade', 'precise'],
+  hammer: ['heavy'], scythe: ['blade', 'elemental'],
+  pistol: ['gun', 'precise'], smg: ['gun'], shotgun: ['gun', 'heavy'],
+  shuriken: ['blade', 'precise'], wand: ['elemental'], flamer: ['elemental'],
+  laser: ['gun', 'elemental'], sniper: ['gun', 'precise'], rocket: ['heavy', 'elemental'],
+  minigun: ['gun'], tesla: ['elemental'],
+};
+for (const id of WEAPON_IDS) WEAPONS[id].tags = WEAPON_TAGS[id] || [];
+
+export const SET_STEPS = [2, 4, 6];
+export const CLASSES = {
+  blade:     { name: 'Blade',     color: '#a6f0c6', stat: 'lifesteal', steps: [3, 6, 10] },
+  heavy:     { name: 'Heavy',     color: '#ffb37a', stat: 'damage',    steps: [8, 18, 30] },
+  gun:       { name: 'Gun',       color: '#ffe9a8', stat: 'ranged',    steps: [3, 7, 12] },
+  elemental: { name: 'Elemental', color: '#c39bff', stat: 'elem',      steps: [3, 7, 12] },
+  precise:   { name: 'Precise',   color: '#7ec8ff', stat: 'crit',      steps: [5, 12, 20] },
+};
+export const CLASS_IDS = Object.keys(CLASSES);
+
+/** How many owned weapons carry each class tag. Levels do not count double. */
+export function classCounts(weapons) {
+  const n = {};
+  for (const w of weapons) for (const t of WEAPONS[w.id].tags) n[t] = (n[t] || 0) + 1;
+  return n;
+}
+
+/** Index of the set-bonus tier reached with `count` weapons, or -1. */
+export function setTier(count) {
+  let t = -1;
+  for (let i = 0; i < SET_STEPS.length; i++) if (count >= SET_STEPS[i]) t = i;
+  return t;
+}
+
+/** Stat mods granted by every reached set bonus, ready for recomputeStats. */
+export function setBonusMods(weapons) {
+  const mods = {};
+  const counts = classCounts(weapons);
+  for (const c in counts) {
+    const t = setTier(counts[c]);
+    if (t < 0) continue;
+    const cls = CLASSES[c];
+    mods[cls.stat] = (mods[cls.stat] || 0) + cls.steps[t];
+  }
+  return mods;
+}
+
+// --------------------------------------------------------------------------
 // Weapon levels (Brotato-style combining).
 //
 // `tier` above is *rarity* - which shop pool a weapon rolls from. `lvl` is a
@@ -186,7 +258,42 @@ export const ITEMS = [
   { id: 'nucleus',   name: 'Nucleus',         tier: 4, price: 95, mods: { melee: 6, ranged: 6, elem: 6, atkSpeed: 8 } },
   { id: 'phantom',   name: 'Phantom Cloak',   tier: 4, price: 90, mods: { dodge: 16, speed: 12, maxHp: -6 } },
   { id: 'jackpot',   name: 'Jackpot',         tier: 4, price: 94, mods: { crit: 18, critMult: 60, luck: 40 } },
+
+  // ---- effect items: one mechanic each, one copy per player. These are the
+  // build-defining pieces; the stat sticks above are what you buy around them.
+  { id: 'cactus',      name: 'Thorns',       tier: 1, price: 16, unique: true, effect: 'thorns',      v: 8,
+    desc: 'Enemies that touch you take 8 damage.' },
+  { id: 'adrenaline',  name: 'Adrenaline',   tier: 1, price: 15, unique: true, effect: 'adrenaline',  v: 35,
+    desc: '+35% speed for 2s after you take a hit.' },
+  { id: 'medkit',      name: 'Field Kit',    tier: 1, price: 14, unique: true, effect: 'medkit',      v: 5,
+    desc: 'Health drops are 3x as common and heal 5.' },
+  { id: 'piggy',       name: 'Piggy Bank',   tier: 2, price: 30, unique: true, effect: 'interest',    v: 20,
+    desc: 'End of wave: +20% of your unspent materials (max 40).' },
+  { id: 'frag',        name: 'Volatile',     tier: 2, price: 34, unique: true, effect: 'frag',        v: 40,
+    desc: 'Enemies explode on death for 40% of their max HP.' },
+  { id: 'frenzy',      name: 'Frenzy',       tier: 2, price: 32, unique: true, effect: 'frenzy',      v: 4,
+    desc: 'Each kill: +4% attack speed for 3s. Stacks 8 times.' },
+  { id: 'executioner', name: 'Executioner',  tier: 2, price: 31, unique: true, effect: 'execute',     v: 60,
+    desc: '+60% damage to enemies below 30% HP.' },
+  { id: 'momentum',    name: 'Momentum',     tier: 2, price: 30, unique: true, effect: 'momentum',    v: 30,
+    desc: '+1% damage per kill this wave, up to +30%. Resets each wave.' },
+  { id: 'ricochet',    name: 'Ricochet',     tier: 3, price: 55, unique: true, effect: 'ricochet',    v: 1,
+    desc: 'Bullets that would stop bounce to a nearby enemy once.' },
+  { id: 'alchemy',     name: 'Alchemy',      tier: 3, price: 56, unique: true, effect: 'alchemy',     v: 12,
+    desc: 'Every 12 materials you collect heal 1 HP.' },
 ];
+
+export const ITEM_BY_ID = Object.fromEntries(ITEMS.map((i) => [i.id, i]));
+
+/** Sum of `v` per effect across owned items. Uniques mean this is one entry each. */
+export function effectMap(itemIds) {
+  const fx = {};
+  for (const id of itemIds) {
+    const it = ITEM_BY_ID[id];
+    if (it && it.effect) fx[it.effect] = (fx[it.effect] || 0) + it.v;
+  }
+  return fx;
+}
 
 export const TIER_COLOR = ['#8c93a1', '#6ec1ff', '#c084fc', '#ffc857'];
 export const TIER_NAME = ['Common', 'Uncommon', 'Rare', 'Legendary'];
@@ -230,17 +337,18 @@ export const UPGRADES = [
 
 // --------------------------------------------------------------------------
 // Enemies. Array index IS the network id, so never reorder this list.
+// One new type every wave or two from wave 4 on; bosses fill the gaps at 5/10/15/20.
 // --------------------------------------------------------------------------
 export const ENEMIES = [
   { name: 'Grunt',    ai: 'chase',   hp: 12,  spd: 78,  dmg: 2,  r: 15, color: '#e05f5f', mats: 1, minWave: 1 },
   { name: 'Runner',   ai: 'chase',   hp: 7,   spd: 145, dmg: 2,  r: 12, color: '#f0a35e', mats: 1, minWave: 2 },
   { name: 'Tank',     ai: 'chase',   hp: 46,  spd: 48,  dmg: 5,  r: 25, color: '#8c6bb1', mats: 2, minWave: 3 },
   { name: 'Shooter',  ai: 'shoot',   hp: 16,  spd: 62,  dmg: 3,  r: 15, color: '#5ea8e0', mats: 2, minWave: 4, keep: 330, fireCd: 3.0, shotSpd: 215 },
-  { name: 'Charger',  ai: 'charge',  hp: 26,  spd: 70,  dmg: 5,  r: 18, color: '#d94f8c', mats: 2, minWave: 5 },
-  { name: 'Exploder', ai: 'explode', hp: 14,  spd: 118, dmg: 9, r: 16, color: '#ff5c2e', mats: 2, minWave: 6, aoe: 95 },
-  { name: 'Spitter',  ai: 'shoot',   hp: 22,  spd: 55,  dmg: 3,  r: 17, color: '#7ed957', mats: 3, minWave: 8, keep: 400, fireCd: 2.6, shotSpd: 205, shots: 3, spread: 0.3 },
-  { name: 'Swarmer',  ai: 'chase',   hp: 5,   spd: 160, dmg: 1,  r: 9,  color: '#ffd166', mats: 1, minWave: 4, pack: 6 },
-  { name: 'Warden',   ai: 'boss',    hp: 620, spd: 58,  dmg: 9, r: 46, color: '#ff3b6b', mats: 40, minWave: 5,  boss: true, ringCd: 3.2, ringN: 16, shotSpd: 185 },
+  { name: 'Charger',  ai: 'charge',  hp: 26,  spd: 70,  dmg: 5,  r: 18, color: '#d94f8c', mats: 2, minWave: 7 },
+  { name: 'Exploder', ai: 'explode', hp: 14,  spd: 118, dmg: 9, r: 16, color: '#ff5c2e', mats: 2, minWave: 8, aoe: 95 },
+  { name: 'Spitter',  ai: 'shoot',   hp: 22,  spd: 55,  dmg: 3,  r: 17, color: '#7ed957', mats: 3, minWave: 10, keep: 400, fireCd: 2.6, shotSpd: 205, shots: 3, spread: 0.3 },
+  { name: 'Swarmer',  ai: 'chase',   hp: 5,   spd: 160, dmg: 1,  r: 9,  color: '#ffd166', mats: 1, minWave: 6, pack: 6 },
+  { name: 'Warden',   ai: 'boss',    hp: 620, spd: 58,  dmg: 9, r: 46, color: '#ff3b6b', mats: 40, minWave: 5,  boss: true, ringCd: 3.2, ringN: 12, shotSpd: 185 },
   { name: 'Devourer', ai: 'boss',    hp: 1500, spd: 72, dmg: 13, r: 56, color: '#b026ff', mats: 80, minWave: 15, boss: true, ringCd: 2.4, ringN: 24, shotSpd: 210, summon: true },
 ];
 
@@ -248,4 +356,4 @@ export const ENEMIES = [
 export function bossForWave(w) { return w >= 15 ? 9 : 8; }
 
 export const SIGNAL_PREFIX = 'brtoi-';   // PeerJS ids are namespaced to avoid clashes
-export const PROTO_VERSION = 4;
+export const PROTO_VERSION = 6;

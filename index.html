@@ -21,7 +21,7 @@
   <!-- ==================== In-game HUD ==================== -->
   <div id="hud" class="hidden">
     <div class="hud-top">
-      <div class="hud-box" id="waveBox"><span class="lbl">WAVE</span><b id="waveNum">1</b></div>
+      <div class="hud-box" id="waveBox"><span class="lbl">WAVE</span><b id="waveNum">1</b><span id="dangerTag" class="danger-tag hidden"></span></div>
       <div class="hud-timer"><div id="timerFill"></div><span id="timerTxt">20</span></div>
       <div class="hud-box" id="matBox"><span class="lbl">MATERIALS</span><b id="matNum">0</b></div>
     </div>
@@ -56,6 +56,7 @@
           <button id="btnJoinPane" class="btn">Join with a code</button>
         </div>
         <p class="hint">Up to 8 players. The host runs the game world, so pick whoever has the best connection.</p>
+        <p id="records" class="records hidden"></p>
         <button id="btnNetTest" class="btn link">Test my connection</button>
         <div id="netTest" class="net-test hidden"></div>
       </div>
@@ -78,7 +79,7 @@
         <button id="btnCancel" class="btn ghost">Cancel</button>
       </div>
     </div>
-    <footer class="credit">WASD / arrows to move &middot; mouse aims &middot; weapons fire themselves</footer>
+    <footer class="credit">WASD / arrows to move &middot; you face where you go &middot; weapons fire themselves</footer>
   </section>
 
   <!-- ==================== Lobby ==================== -->
@@ -101,6 +102,11 @@
         <aside class="lobby-side">
           <h3>Players</h3>
           <ul id="playerList" class="player-list"></ul>
+          <div id="dangerBox" class="danger-box">
+            <span class="lbl">DANGER</span>
+            <div id="dangerOpts" class="danger-opts"></div>
+            <p id="dangerDesc" class="sub"></p>
+          </div>
           <button id="btnReady" class="btn primary wide">Ready</button>
           <button id="btnLeave" class="btn ghost wide">Leave</button>
         </aside>
@@ -115,6 +121,7 @@
         <div>
           <h2>Shop</h2>
           <p class="sub">Wave <b id="shopNext">2</b> starts when everyone is ready.</p>
+          <p class="sub summary" id="shopSummary"></p>
         </div>
         <div class="shop-meta">
           <div class="hud-box"><span class="lbl">MATERIALS</span><b id="shopMats">0</b></div>
@@ -132,6 +139,7 @@
       <div class="shop-lower">
         <div class="panel">
           <h3>Weapons <small id="wslots"></small></h3>
+          <div id="classRow" class="class-row"></div>
           <div id="invWeapons" class="inv-grid"></div>
         </div>
         <div class="panel">
@@ -157,8 +165,10 @@
     <div class="over-card">
       <h2 id="overTitle">Run over</h2>
       <p class="sub" id="overSub"></p>
+      <p class="best hidden" id="overBest"></p>
       <ul id="scoreList" class="score-list"></ul>
       <div class="btn-col">
+        <button id="btnContinue" class="btn primary hidden">Continue into endless</button>
         <button id="btnAgain" class="btn primary">Back to lobby</button>
         <button id="btnQuit" class="btn ghost">Main menu</button>
       </div>

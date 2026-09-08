@@ -85,22 +85,53 @@ pausing is exactly the behaviour you want.
 
 ## Gameplay
 
-- **20 waves**, bosses on every 5th.
+- **20 waves** to the win, bosses on every 5th, then **endless**: the host can
+  keep the run going past wave 20 with everything the squad owns, against
+  enemies that compound 10% per wave until they finally take you down. Waves
+  grow from 21 s to 60 s, so a full clear is about 15 minutes of fighting.
+- **Danger 0-3**, picked by the host in the lobby. Each level multiplies enemy
+  health, damage and spawn rate and adds elites, but also pays out more
+  materials. Beating a Danger unlocks the next.
 - **8 characters** with real trade-offs (armoured and slow, fast and papery,
-  lifesteal but weak hits…).
-- **16 weapons** — melee arcs, shotguns, homing wands, rockets, chain lightning.
-  You carry up to 6 and they all fire themselves.
-- **30 items** and a level-up pick every level, drawn from ~30 upgrades.
+  lifesteal but weak hits…). Four are unlocked by playing: reach wave 8,
+  reach wave 12, win a run, win on Danger 1.
+- **16 weapons** in **5 classes** (Blade, Heavy, Gun, Elemental, Precise).
+  Owning 2 / 4 / 6 weapons of one class grants a set bonus, and two identical
+  weapons combine into a higher level. You carry up to 6 and they all fire
+  themselves.
+- **30 stat items** plus **10 effect items**, one copy each, that change how
+  the run plays: kills explode, enemies that touch you bleed, unspent
+  materials earn interest, bullets ricochet, kills stack attack speed…
+- **Boss loot**: a dead boss drops a crate holding a free rare item.
 - **17 stats** that actually interact (armour is a diminishing-returns curve,
   negative armour amplifies damage, crit/luck/harvesting feed each other).
 - Materials are both **currency and XP**, so every pickup is a real decision.
+  Health is restored in full between waves; a wave is its own test.
 - Co-op: shared arena and wave, **separate inventories and economies**. Downed
-  players spectate until the wave ends, then come back at half health.
+  players spectate until the wave ends, then come back at full health.
+- **Dropped? Refresh.** The host keeps a disconnected player's slot, build and
+  materials for the rest of the run. Reloading the tab rejoins the same room
+  automatically (the tab remembers its seat and a secret token); mid-wave you
+  spectate until the next wave starts. Leaving on purpose forgets the seat.
+- Progress (best wave per character, unlocks) is saved in the browser.
 
-**Controls** — `WASD`/arrows move, mouse aims, `1`–`4` pick a level-up.
-Weapons fire on their own, but aim still matters: a target inside your aim cone
-is preferred over a marginally closer one behind you. Touch devices get a
-virtual stick.
+**Controls** — `WASD`/arrows move, `1`–`4` pick a level-up. You face the way
+you move and every weapon targets the nearest enemy on its own. Touch devices
+get a virtual stick.
+
+### Balance harness
+
+`world.js` is pure JavaScript, so the whole simulation runs headless:
+
+```bash
+node tools/sim.mjs                     # every character, danger 0
+node tools/sim.mjs --runs 30 --danger 2 --char 3,7 --endless 40 --trace
+```
+
+A scripted bot kites, buys the best damage-per-material weapon and takes the
+damage upgrade. It plays worse than a person, so its median death wave is a
+floor. What the table is for is spotting a character or a curve that is out of
+line with the rest before a player does.
 
 ---
 
@@ -166,8 +197,9 @@ index.html          shell + HUD/shop/lobby markup
 style.css           all UI; the canvas is a full-viewport layer underneath
 src/
   config.js         signalling, ICE, tick rates — the only file to edit to self-host
-  data.js           characters, weapons, items, enemies, upgrades (pure data)
+  data.js           characters, weapons, classes, items, enemies, danger (pure data)
   world.js          the authoritative simulation (host only)
+  progress.js       records and unlocks, localStorage only
   protocol.js       binary snapshot/input packing
   net.js            PeerJS transport, host + client
   clientstate.js    snapshot buffering, interpolation, prediction & reconciliation
@@ -175,6 +207,8 @@ src/
   ui.js             DOM panels, driven purely by control messages
   audio.js          procedural WebAudio sfx, zero asset files
   main.js           mode wiring, sim clock, render loop
+tools/
+  sim.mjs           headless balance harness (node)
 ```
 
 Two deliberate choices worth flagging:

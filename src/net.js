@@ -51,6 +51,13 @@ function watchIce(conn, onState) {
   setTimeout(() => clearInterval(t), 20000);
 }
 
+/** Per-session secret a rejoining client uses to prove it owned a slot. */
+export function makeToken() {
+  const a = new Uint8Array(12);
+  crypto.getRandomValues(a);
+  return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 export function makeRoomCode() {
   // Ambiguity-free alphabet: no O/0, no I/1 - people read these aloud.
   const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -103,6 +110,7 @@ export class Host {
     this.cb = cb;
     this.peer = null;
     this.peers = new Map();      // peerId -> { pid, name, ctrl, state, alive }
+    this.departed = new Map();   // pid -> { token, name }: slots a refresh can reclaim
     this.nextPid = 2;            // host is always pid 1
     this.open = false;
   }
@@ -166,6 +174,20 @@ export class Host {
         setTimeout(() => this._drop(peerId), 400);
         return;
       }
+      rec.token = String(msg.token || '').slice(0, 64);
+      // A refresh mid-run comes back as a brand-new peer. If it can name the
+      // slot it held and prove it with the token it was issued, hand the slot
+      // back instead of seating a stranger.
+      const old = msg.rejoin ? this.departed.get(msg.rejoin | 0) : null;
+      if (old && rec.token && old.token === rec.token) {
+        this.departed.delete(msg.rejoin | 0);
+        rec.pid = msg.rejoin | 0;
+        rec.name = old.name;
+        rec.joined = true;
+        rec.ctrl.send({ t: 'welcome', pid: rec.pid, code: this.code, rejoined: true });
+        this.cb.onRejoin?.(rec.pid, rec.name);
+        return;
+      }
       // Count actual players, not half-finished handshakes.
       if ([...this.peers.values()].filter((r) => r.joined).length >= 7) {
         rec.ctrl?.send({ t: 'reject', reason: 'Room is full (8 players max).' });
@@ -187,8 +209,14 @@ export class Host {
     if (!rec) return;
     this.peers.delete(peerId);
     try { rec.ctrl?.close(); rec.state?.close(); } catch { /* noop */ }
-    if (rec.joined) this.cb.onLeave?.(rec.pid);
+    if (rec.joined) {
+      if (rec.token) this.departed.set(rec.pid, { token: rec.token, name: rec.name });
+      this.cb.onLeave?.(rec.pid);
+    }
   }
+
+  /** Forget a slot for good (the player left on purpose, or the run reset). */
+  forget(pid) { this.departed.delete(pid); }
 
   sendControl(pid, msg) {
     for (const rec of this.peers.values()) {
@@ -233,11 +261,17 @@ export class Host {
 // Client
 // ===========================================================================
 export class Client {
-  /** @param cb { onControl(msg), onState(bytes), onStatus(text,kind), onClose() } */
-  constructor(code, name, cb) {
+  /**
+   * @param cb     { onControl(msg), onState(bytes), onStatus(text,kind), onClose() }
+   * @param rejoin { pid, token } from a previous session in this room, if any
+   */
+  constructor(code, name, cb, rejoin = null) {
     this.code = code.toUpperCase().trim();
     this.name = name;
     this.cb = cb;
+    this.token = rejoin?.token || makeToken();
+    this.rejoin = rejoin?.pid || 0;
+    this.rejoined = false;
     this.peer = null;
     this.ctrl = null;
     this.state = null;
@@ -296,13 +330,14 @@ export class Client {
 
         this.ctrl.on('open', () => {
           this.reachedHost = true;
-          this.ctrl.send({ t: 'hello', name: this.name, ver: PROTO_VERSION });
+          this.ctrl.send({ t: 'hello', name: this.name, ver: PROTO_VERSION, token: this.token, rejoin: this.rejoin });
         });
         this.ctrl.on('data', (msg) => {
           if (msg && msg.t === 'welcome') {
             settled = true;
             clearTimeout(timer);
             this.pid = msg.pid;
+            this.rejoined = !!msg.rejoined;
             resolve(msg);
             return;
           }
