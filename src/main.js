@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { World, TICK, PHASE } from './world.js';
-import { Host, Client, makeRoomCode, b64ToBytes } from './net.js';
+import { Host, Client, makeRoomCode, makeToken, b64ToBytes } from './net.js';
 
 // Where a client keeps "I was pid N in room X" so a refresh can rejoin the
 // same run. sessionStorage is per tab on purpose: a host and a client open in
@@ -30,16 +30,42 @@ function loadSession() {
 }
 function saveSession(s) { try { sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, at: Date.now() })); } catch { /* noop */ } }
 function clearSession() { try { sessionStorage.removeItem(SESSION_KEY); } catch { /* noop */ } }
+
+/**
+ * A stable identity for this tab, minted once and kept for the tab's life.
+ *
+ * It does two jobs. It proves to the host that a reconnecting player owned the
+ * seat they are asking for, and - because it outlives leaving the room - it is
+ * what makes a kick last longer than the two seconds it takes to press Join
+ * again. A fresh token per join would make the host unable to tell a kicked
+ * player from a new one.
+ *
+ * It is deliberately not proof against someone who opens a new tab: with no
+ * server and no accounts there is nothing to check an identity against, so
+ * this raises the cost of coming back rather than making it impossible.
+ */
+const TOKEN_KEY = 'pr_token';
+function tabToken() {
+  let t = null;
+  try { t = sessionStorage.getItem(TOKEN_KEY); } catch { /* private mode */ }
+  if (!t) {
+    t = makeToken();
+    try { sessionStorage.setItem(TOKEN_KEY, t); } catch { /* private mode: kicks last one session */ }
+  }
+  return t;
+}
 import { ClientState } from './clientstate.js';
-import { Renderer } from './render3d.js';
+import { Renderer as Renderer3D } from './render3d.js';
+import { Renderer as Renderer2D } from './render.js';
 import { UI } from './ui.js';
+import * as settings from './settings.js';
 import {
   encodeSnapshot, decodeSnapshot, encodeInput, decodeInput, asView,
   MSG, FX, INPUT_REDUNDANCY,
 } from './protocol.js';
 import { INPUT_HZ } from './config.js';
 import { sfx, unlock, setMuted } from './audio.js';
-import { waveDuration } from './data.js';
+import { ARENA, waveDuration } from './data.js';
 import * as progress from './progress.js';
 
 const MODE = { MENU: 0, SOLO: 1, HOST: 2, CLIENT: 3 };
@@ -71,6 +97,7 @@ function keyToken(e) {
 const MOVE_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD',
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']);
 const LOCAL_PID = 1;
+const FREECAM_SPEED = 620;   // world units per second while flying the free camera
 
 /**
  * A timer that keeps running when the tab is not visible.
@@ -110,7 +137,7 @@ class Game {
     this.host = null;
     this.client = null;
     this.state = new ClientState((fx) => this.onFx(fx));
-    this.renderer = new Renderer(document.getElementById('game'));
+    this.renderer = this.makeRenderer(settings.get().view);
     this.ui = new UI(this.uiCallbacks());
     this.shop = null;
     this.levelMsg = null;
@@ -124,12 +151,27 @@ class Game {
     this.keys = new Set();
     this.lastAim = 0;   // facing persists while standing still
     this.touch = null;
-    this.muted = false;
+    this.builds = new Map();   // pid -> { level, weapons }, for the spectator panel
+    // Spectator camera, used only while you are down and the wave is still on.
+    this.spec = { on: false, target: 0, free: false, pos: { x: ARENA.w / 2, y: ARENA.h / 2 } };
+    this.specList = [];
     // Press P for a live cost breakdown. The only honest way to find a stutter
     // is to measure it on the machine that stutters.
     this.perf = { on: false, sim: 0, draw: 0, hud: 0, frames: 0, ticks: 0, at: 0 };
 
     this.bindInput();
+    this.applyRenderSettings();
+    setMuted(settings.get().muted);
+    this.ui.renderSettings(settings.get());
+    settings.subscribe((s, changed) => {
+      if (changed.includes('view')) this.swapRenderer(s.view);
+      else this.applyRenderSettings();
+      if (changed.includes('muted')) {
+        setMuted(s.muted);
+        this.ui.toast(s.muted ? 'Sound off' : 'Sound on');
+      }
+      this.ui.renderSettings(s);
+    });
     this.ui.screen('menu');
 
     // ?r=CODE deep link: an invite link should drop you straight at the code box.
@@ -197,12 +239,47 @@ class Game {
         const { checkConnectivity } = await import('./netcheck.js');
         this.ui.netTest('done', await checkConnectivity());
       },
-      onMute: () => {
-        this.muted = !this.muted;
-        setMuted(this.muted);
-        document.getElementById('btnMute').textContent = this.muted ? '\u{1F507}' : '\u{1F50A}';
-      },
+      onMute: () => settings.set({ muted: !settings.get().muted }),
+      onSetting: (patch) => settings.set(patch),
+      onZoom: (n) => settings.zoomBy(n),
+      onSpectate: (dir) => this.cycleSpectate(dir),
+      onSpectatePid: (pid) => this.watchPlayer(pid),
+      onFreeCam: () => this.toggleFreeCam(),
+      onKick: (pid) => this.sendControl({ t: 'kick', id: pid }),
+      onForceStart: () => { unlock(); this.sendControl({ t: 'forcestart' }); },
     };
+  }
+
+  // =========================================================================
+  // Renderers
+  //
+  // The two renderers are interchangeable but cannot share a canvas: a canvas
+  // element hands out exactly one context for its lifetime, and asking a
+  // WebGL canvas for a '2d' context returns null. So a display switch replaces
+  // the element, which also means re-binding the pointer and touch handlers
+  // that live on it.
+  // =========================================================================
+  makeRenderer(mode) {
+    const canvas = document.getElementById('game');
+    return mode === '2d' ? new Renderer2D(canvas) : new Renderer3D(canvas);
+  }
+
+  swapRenderer(mode) {
+    const old = document.getElementById('game');
+    try { this.renderer.dispose(); } catch { /* a half-built renderer is still worth replacing */ }
+    const next = document.createElement('canvas');
+    next.id = 'game';
+    old.replaceWith(next);
+    this.renderer = mode === '2d' ? new Renderer2D(next) : new Renderer3D(next);
+    this.applyRenderSettings();
+    this.bindCanvas(next);
+    this.ui.toast(mode === '2d' ? 'Top-down 2D view' : '3D view');
+  }
+
+  applyRenderSettings() {
+    const s = settings.get();
+    this.renderer.setZoom(s.zoom);
+    this.renderer.setOptions({ shake: s.shake, floats: s.floats });
   }
 
   makeWorld() {
@@ -211,6 +288,8 @@ class Game {
       else if (pid === LOCAL_PID) this.onControl(msg);
       else this.host?.sendControl(pid, msg);
     }, LOCAL_PID);
+    // The simulation decides a kick; only the transport can enforce it.
+    this.world.onKick = (pid) => this.host?.kick(pid);
     this.world.addPlayer(LOCAL_PID, this.ui.playerName);
     this.world.onControl(LOCAL_PID, { t: 'char', id: this.ui.selChar });
   }
@@ -301,7 +380,7 @@ class Game {
       onStatus: (t, k) => this.ui.toast(t, k),
       onStage: (t) => this.ui.connecting(t),
       onClose: () => this.onLinkLost(code),
-    }, rejoin);
+    }, { pid: rejoin?.pid || 0, token: tabToken() });
 
     try {
       await this.client.start();
@@ -357,7 +436,13 @@ class Game {
     this.state.you = null;
     this.shop = null;
     this.levelMsg = null;
+    this.builds.clear();
+    this.spec.on = false;
+    this.spec.target = 0;
+    this.spec.free = false;
+    this.specList.length = 0;
     this.ui.renderLevelup(null);
+    this.ui.renderSpectate(null);
     this.ui.netBadge(null);
     this.ui.pane('menuMain');
     this.ui.screen('menu');
@@ -392,7 +477,7 @@ class Game {
         const next = new Map();
         for (const p of msg.players) next.set(p.id, p);
         this.state.roster = next;
-        this.ui.renderPlayers(next, this.myPid);
+        this.ui.renderPlayers(next, this.myPid, msg.host, msg.phase);
         this.danger = msg.danger | 0;
         this.ui.renderDanger(this.danger, msg.host === this.myPid && msg.phase === PHASE.LOBBY);
         if (msg.phase === PHASE.LOBBY) {
@@ -417,6 +502,14 @@ class Game {
         break;
       case 'shop':
         this.shop = msg;
+        break;
+      case 'builds':
+        this.builds = new Map(msg.players.map((p) => [p.id, p]));
+        break;
+      case 'kicked':
+        // Not a dropped link: do not try to crawl back into the room.
+        this.ui.toast('The host removed you from the room.', 'bad');
+        this.teardown();
         break;
       case 'level':
         this.levelMsg = msg.options ? msg : null;
@@ -487,8 +580,6 @@ class Game {
   // Input
   // =========================================================================
   bindInput() {
-    const canvas = document.getElementById('game');
-
     // Movement keys are swallowed with preventDefault so the page never
     // scrolls mid-fight. That must not apply while the player is typing: it
     // used to make W, A, S and D impossible to put in your own name.
@@ -513,13 +604,42 @@ class Game {
         const i = +digit[1] - 1;
         if (this.levelMsg.options[i]) { sfx.buy(); this.sendControl({ t: 'levelpick', idx: i }); }
       }
+      // Zoom on the keyboard as well as the wheel - trackpads and laptops
+      // without a wheel are the common case on a browser game.
+      if (k === 'Equal' || k === 'NumpadAdd') settings.zoomBy(-1);
+      if (k === 'Minus' || k === 'NumpadSubtract') settings.zoomBy(1);
+      // While you are down, the movement keys have nothing to drive, so they
+      // drive the spectator camera instead.
+      if (this.spec.on) {
+        if (k === 'KeyF') this.toggleFreeCam();
+        else if (!this.spec.free) {
+          if (k === 'KeyA' || k === 'ArrowLeft') this.cycleSpectate(-1);
+          else if (k === 'KeyD' || k === 'ArrowRight' || k === 'Space') this.cycleSpectate(1);
+        }
+      }
     });
     // No `typing` guard here on purpose: a key pressed before focus moved into
     // a field still has to be released, or it sticks down forever.
     addEventListener('keyup', (e) => this.keys.delete(keyToken(e)));
     addEventListener('blur', () => this.keys.clear());
 
+    this.bindCanvas(document.getElementById('game'));
+  }
+
+  /**
+   * Pointer and touch handlers, re-attached whenever the canvas element is
+   * replaced by a display switch.
+   */
+  bindCanvas(canvas) {
     canvas.addEventListener('mousedown', () => unlock());
+
+    // Wheel zooms the 3D camera. The 2D view has no camera to move, so it is
+    // left alone rather than given a meaningless-but-different behaviour.
+    canvas.addEventListener('wheel', (e) => {
+      if (settings.get().view !== '3d') return;
+      e.preventDefault();
+      settings.zoomBy(e.deltaY > 0 ? 1 : -1);
+    }, { passive: false });
 
     // -------- touch: left half drives a virtual stick, aim follows movement
     const stick = document.getElementById('stick');
@@ -618,15 +738,124 @@ class Game {
     }
   }
 
+  // =========================================================================
+  // Spectating
+  //
+  // Going down used to mean staring at your own corpse for the rest of the
+  // wave, which in a 60-second wave-18 fight is a long time to be bored. Now
+  // the camera moves to a teammate who is still up, and you can flip between
+  // them or fly the camera yourself. None of it touches the simulation - a
+  // spectator is just a camera the host never hears about.
+  // =========================================================================
+
+  /** Work out whether we are spectating and who of, then tell the UI. */
+  updateSpectate(view) {
+    const me = view.players.find((p) => p.id === this.myPid);
+    const down = view.phase === PHASE.WAVE && (!me || (me.flags & 1));
+    const others = view.players.filter((p) => p.id !== this.myPid && !(p.flags & 1));
+    this.specList = others.map((p) => p.id);
+
+    if (!down || !others.length) {
+      if (this.spec.on) {
+        this.spec = { ...this.spec, on: false, target: 0, free: false };
+        this.ui.renderSpectate(null);
+      }
+      return;
+    }
+
+    if (!this.spec.on) {
+      this.spec.on = true;
+      this.spec.free = false;
+      // Auto-spectate is a setting because some people want the moment of
+      // "I died here" to stay on screen rather than cut away instantly.
+      this.spec.target = settings.get().autoSpectate ? others[0].id : 0;
+      this.spec.pos = { x: me ? me.x : ARENA.w / 2, y: me ? me.y : ARENA.h / 2 };
+    }
+    // The potato we were watching can go down too; follow the next one up.
+    if (this.spec.target && !this.specList.includes(this.spec.target)) {
+      this.spec.target = others[0].id;
+    }
+
+    if (this.spec.free) this.moveFreeCam();
+
+    const tgt = others.find((p) => p.id === this.spec.target);
+    this.ui.renderSpectate({
+      free: this.spec.free,
+      count: others.length,
+      timeLeft: view.timeLeft,
+      target: tgt ? {
+        id: tgt.id,
+        name: this.state.roster.get(tgt.id)?.name || 'Player',
+        char: this.state.roster.get(tgt.id)?.char ?? 0,
+        hp: tgt.hp, maxHp: tgt.maxHp,
+        build: this.builds.get(tgt.id) || null,
+      } : null,
+      others: others.map((p) => ({
+        id: p.id,
+        name: this.state.roster.get(p.id)?.name || 'Player',
+        char: this.state.roster.get(p.id)?.char ?? 0,
+      })),
+    });
+  }
+
+  /** The free camera flies on the same keys that would move a living potato. */
+  moveFreeCam() {
+    let mx = 0, my = 0;
+    const k = this.keys;
+    if (k.has('KeyA') || k.has('ArrowLeft')) mx -= 1;
+    if (k.has('KeyD') || k.has('ArrowRight')) mx += 1;
+    if (k.has('KeyW') || k.has('ArrowUp')) my -= 1;
+    if (k.has('KeyS') || k.has('ArrowDown')) my += 1;
+    if (this.touch) { mx += this.touch.dx; my += this.touch.dy; }
+    if (!mx && !my) return;
+    const d = Math.hypot(mx, my) || 1;
+    const step = FREECAM_SPEED * Math.min(0.1, this.frameDt || 0.016);
+    const p = this.spec.pos;
+    p.x = Math.max(0, Math.min(ARENA.w, p.x + (mx / d) * step));
+    p.y = Math.max(0, Math.min(ARENA.h, p.y + (my / d) * step));
+  }
+
+  cycleSpectate(dir) {
+    if (!this.spec.on || !this.specList.length) return;
+    this.spec.free = false;
+    const i = this.specList.indexOf(this.spec.target);
+    const n = this.specList.length;
+    this.spec.target = this.specList[(((i < 0 ? 0 : i + dir) % n) + n) % n];
+  }
+
+  watchPlayer(pid) {
+    if (!this.spec.on || !this.specList.includes(pid)) return;
+    this.spec.free = false;
+    this.spec.target = pid;
+  }
+
+  toggleFreeCam() {
+    if (!this.spec.on) return;
+    this.spec.free = !this.spec.free;
+    if (this.spec.free) {
+      // Start the free camera where the eye already is, not at the origin.
+      const view = this.state.sample(performance.now());
+      const tgt = view?.players.find((p) => p.id === this.spec.target);
+      if (tgt) this.spec.pos = { x: tgt.x, y: tgt.y };
+    }
+  }
+
   frame(now) {
     requestAnimationFrame((t) => this.frame(t));
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
+    this.frameDt = dt;
 
     if (this.mode === MODE.MENU) { this.renderer.draw(null, null, dt); return; }
 
     const view = this.state.sample(performance.now());
     const info = { pid: this.myPid, roster: this.state.roster, danger: 0 };
+    if (view) this.updateSpectate(view);
+    if (this.spec.on) {
+      info.watching = this.spec.free ? 0 : this.spec.target;
+      info.follow = this.spec.free ? 0 : (this.spec.target || this.myPid);
+      info.followPos = this.spec.free ? this.spec.pos : null;
+    }
     if (view && view.phase === PHASE.WAVE) {
       const dur = waveDuration(view.wave);
       info.danger = 1 - Math.max(0, Math.min(1, view.timeLeft / dur));

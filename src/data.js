@@ -356,4 +356,4 @@ export const ENEMIES = [
 export function bossForWave(w) { return w >= 15 ? 9 : 8; }
 
 export const SIGNAL_PREFIX = 'brtoi-';   // PeerJS ids are namespaced to avoid clashes
-export const PROTO_VERSION = 6;
+export const PROTO_VERSION = 7;

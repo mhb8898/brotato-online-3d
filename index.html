@@ -37,6 +37,27 @@
 
     <div id="teamPanel" class="team-panel"></div>
     <div id="netBadge" class="net-badge hidden"></div>
+
+    <!-- Shown only while you are down and the wave is still running. -->
+    <div id="spectate" class="spectate hidden">
+      <div class="spec-head">
+        <span class="lbl">SPECTATING</span>
+        <span id="specHint" class="spec-hint"></span>
+      </div>
+      <div class="spec-main">
+        <button id="specPrev" class="btn tiny" title="Previous teammate (A / left arrow)">&#9664;</button>
+        <div class="spec-who">
+          <div class="spec-name"><span class="dot" id="specDot"></span><b id="specName">-</b></div>
+          <div class="spec-bar"><i id="specHp"></i></div>
+          <div id="specBuild" class="spec-build"></div>
+        </div>
+        <button id="specNext" class="btn tiny" title="Next teammate (D / right arrow)">&#9654;</button>
+      </div>
+      <div class="spec-foot">
+        <div id="specPicks" class="spec-picks"></div>
+        <button id="specFree" class="btn tiny" title="Fly the camera yourself (F)">Free cam</button>
+      </div>
+    </div>
   </div>
 
   <!-- ==================== Main menu ==================== -->
@@ -57,6 +78,7 @@
         </div>
         <p class="hint">Up to 8 players. The host runs the game world, so pick whoever has the best connection.</p>
         <p id="records" class="records hidden"></p>
+        <button id="btnSettingsMenu" class="btn link">Settings</button>
         <button id="btnNetTest" class="btn link">Test my connection</button>
         <div id="netTest" class="net-test hidden"></div>
       </div>
@@ -108,6 +130,7 @@
             <p id="dangerDesc" class="sub"></p>
           </div>
           <button id="btnReady" class="btn primary wide">Ready</button>
+          <button id="btnForceStart" class="btn wide hidden">Start now</button>
           <button id="btnLeave" class="btn ghost wide">Leave</button>
         </aside>
       </div>
@@ -134,6 +157,7 @@
       <div class="shop-actions">
         <button id="btnReroll" class="btn">Reroll <b id="rerollCost">2</b></button>
         <button id="btnGo" class="btn primary">Ready for next wave</button>
+        <button id="btnShopForce" class="btn hidden">Start wave now</button>
       </div>
 
       <div class="shop-lower">
@@ -176,8 +200,57 @@
     </div>
   </section>
 
+  <!-- ==================== Settings ==================== -->
+  <div id="settings" class="modal hidden">
+    <div class="modal-card">
+      <header class="modal-head">
+        <div><h2>Settings</h2><p class="sub">Yours alone - nothing here changes the game for anyone else.</p></div>
+        <button id="btnSettingsClose" class="btn ghost tiny">Close</button>
+      </header>
+
+      <div class="set-row">
+        <div class="set-label"><b>Display</b><small>3D follows your potato. 2D shows the whole arena at once and never hides a teammate.</small></div>
+        <div class="seg" id="setView">
+          <button data-v="3d">3D</button>
+          <button data-v="2d">2D</button>
+        </div>
+      </div>
+
+      <div class="set-row" id="setZoomRow">
+        <div class="set-label"><b>Zoom</b><small>How far the 3D camera sits back. The mouse wheel and <kbd>-</kbd>/<kbd>+</kbd> do this too.</small></div>
+        <div class="set-ctl">
+          <input id="setZoom" type="range" min="0.55" max="2.5" step="0.05" aria-label="Camera zoom">
+          <b id="setZoomVal">1.0&times;</b>
+        </div>
+      </div>
+
+      <div class="set-row">
+        <div class="set-label"><b>Screen shake</b><small>Camera kick on explosions and hits.</small></div>
+        <button class="toggle" id="setShake" data-k="shake" aria-pressed="true"><i></i></button>
+      </div>
+
+      <div class="set-row">
+        <div class="set-label"><b>Damage numbers</b><small>Floating numbers over everything you hit.</small></div>
+        <button class="toggle" id="setFloats" data-k="floats" aria-pressed="true"><i></i></button>
+      </div>
+
+      <div class="set-row">
+        <div class="set-label"><b>Auto-spectate</b><small>When you go down mid-wave, jump straight onto a teammate instead of watching your own body.</small></div>
+        <button class="toggle" id="setAutoSpectate" data-k="autoSpectate" aria-pressed="true"><i></i></button>
+      </div>
+
+      <div class="set-row">
+        <div class="set-label"><b>Sound</b><small>Weapons, pickups and the wave horn.</small></div>
+        <button class="toggle" id="setSound" aria-pressed="true"><i></i></button>
+      </div>
+
+      <p class="hint">While you are down: <kbd>A</kbd>/<kbd>D</kbd> switch teammate, <kbd>F</kbd> flies the camera.</p>
+    </div>
+  </div>
+
   <div id="perf" class="perf hidden"></div>
   <div id="toasts" class="toasts"></div>
+  <button id="btnSettings" class="mute gear" title="Settings">&#9881;</button>
   <button id="btnMute" class="mute" title="Mute">&#128266;</button>
 
   <!-- Mobile virtual stick -->

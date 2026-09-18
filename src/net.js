@@ -111,6 +111,7 @@ export class Host {
     this.peer = null;
     this.peers = new Map();      // peerId -> { pid, name, ctrl, state, alive }
     this.departed = new Map();   // pid -> { token, name }: slots a refresh can reclaim
+    this.kicked = new Set();     // tokens the host threw out, for this room's life
     this.nextPid = 2;            // host is always pid 1
     this.open = false;
   }
@@ -175,6 +176,17 @@ export class Host {
         return;
       }
       rec.token = String(msg.token || '').slice(0, 64);
+      // A kick has to outlive the disconnect it causes, or the kicked tab
+      // simply reconnects a second later - both automatically and by pressing
+      // Join again. The token identifies a tab for its whole lifetime, so the
+      // block survives both. It is not proof against a new tab; without a
+      // server there is nothing to check an identity against, and the point is
+      // to end the disruption, not to win an arms race.
+      if (rec.token && this.kicked.has(rec.token)) {
+        rec.ctrl?.send({ t: 'kicked' });
+        setTimeout(() => this._drop(peerId), 400);
+        return;
+      }
       // A refresh mid-run comes back as a brand-new peer. If it can name the
       // slot it held and prove it with the token it was issued, hand the slot
       // back instead of seating a stranger.
@@ -209,7 +221,7 @@ export class Host {
     if (!rec) return;
     this.peers.delete(peerId);
     try { rec.ctrl?.close(); rec.state?.close(); } catch { /* noop */ }
-    if (rec.joined) {
+    if (rec.joined && !rec.kicked) {
       if (rec.token) this.departed.set(rec.pid, { token: rec.token, name: rec.name });
       this.cb.onLeave?.(rec.pid);
     }
@@ -217,6 +229,23 @@ export class Host {
 
   /** Forget a slot for good (the player left on purpose, or the run reset). */
   forget(pid) { this.departed.delete(pid); }
+
+  /**
+   * Throw a player out. The notice goes down the reliable control channel and
+   * the socket is closed a beat later: closing immediately would discard the
+   * buffered message, and the client would see a bare disconnect and start
+   * politely trying to rejoin the room that just ejected them.
+   */
+  kick(pid) {
+    this.departed.delete(pid);
+    for (const [peerId, rec] of this.peers) {
+      if (rec.pid !== pid || !rec.joined) continue;
+      rec.kicked = true;
+      if (rec.token) this.kicked.add(rec.token);
+      try { rec.ctrl?.send({ t: 'kicked' }); } catch { /* already gone */ }
+      setTimeout(() => this._drop(peerId), 400);
+    }
+  }
 
   sendControl(pid, msg) {
     for (const rec of this.peers.values()) {

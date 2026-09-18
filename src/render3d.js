@@ -14,7 +14,12 @@
 // Public surface (must stay compatible with main.js):
 //   new Renderer(canvas)      draw(view, info, dt)      spawnFx(list)
 //   toWorld(screenX, screenY) -> { x, y } in world units (mouse aiming)
+//   setZoom(z)  setOptions(o)  dispose()
 //   .shake  .flash  .parts  .floats
+//
+// `info` may carry a camera override so the same renderer serves both playing
+// and spectating: `follow` is the player id to centre on and `followPos` a
+// free-floating {x, y} that wins over it.
 
 import * as THREE from 'three';
 import { ARENA, CHARACTERS, ENEMIES, WEAPONS, TIER_COLOR } from './data.js';
@@ -195,6 +200,9 @@ export class Renderer {
     this.lastPhase = -1;
     this.decalDirty = false;
     this.shapeSeq = 0;
+    this.zoom = 1;
+    this.opt = { shake: true, floats: true };
+    this.watching = 0;    // player id being spectated, for the overlay marker
 
     // ---- overlay canvas for text
     const ov = document.createElement('canvas');
@@ -224,7 +232,8 @@ export class Renderer {
 
     this.camera = new THREE.PerspectiveCamera(48, 16 / 9, 5, 5000);
     this.camTarget = new THREE.Vector3(ARENA.w / 2, 0, ARENA.h / 2);
-    this.camOffset = new THREE.Vector3(0, 480, 310);
+    this.baseOffset = new THREE.Vector3(0, 480, 310);
+    this.camOffset = this.baseOffset.clone();
     this.camera.position.copy(this.camTarget).add(this.camOffset);
     this.camera.lookAt(this.camTarget);
     this.ray = new THREE.Raycaster();
@@ -244,10 +253,56 @@ export class Renderer {
     this.buildParticles();
 
     this.resize();
-    addEventListener('resize', () => this.resize());
+    this._onResize = () => this.resize();
+    addEventListener('resize', this._onResize);
   }
 
   // ------------------------------------------------------------- setup
+  /** Zoom is a plain multiplier on the camera offset - see applyCamOffset. */
+  setZoom(z) {
+    this.zoom = Math.max(0.2, Math.min(4, +z || 1));
+    this.applyCamOffset();
+  }
+
+  setOptions(o) { Object.assign(this.opt, o); }
+
+  /**
+   * Distance from the player, as aspect ratio and zoom want it.
+   *
+   * Portrait phones see much less to the side, so they get pulled back even at
+   * zoom 1. Fog has to follow: it is what hides the end of the world, and a
+   * camera zoomed out past a fixed fog wall would watch the arena dissolve
+   * into background colour a few hundred units ahead of the walls.
+   */
+  applyCamOffset() {
+    const a = this.camera.aspect;
+    const k = (a < 1 ? 1.5 : a < 1.4 ? 1.2 : 1) * this.zoom;
+    this.camOffset.copy(this.baseOffset).multiplyScalar(k);
+    this.scene.fog.near = 1300 * k;
+    this.scene.fog.far = 2600 * k;
+    this.camera.far = Math.max(5000, 3400 * k);
+    this.camera.updateProjectionMatrix();
+  }
+
+  /**
+   * Give up every GPU resource this renderer holds. Called when the player
+   * switches to the 2D renderer: a WebGL context that is merely dereferenced
+   * can sit around until the browser decides to reap it, and browsers cap how
+   * many live contexts a page may have.
+   */
+  dispose() {
+    removeEventListener('resize', this._onResize);
+    this.scene.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      const m = o.material;
+      if (m) for (const mm of Array.isArray(m) ? m : [m]) { mm.map?.dispose(); mm.dispose(); }
+    });
+    this.decalTex?.dispose();
+    this.matCache.clear();
+    try { this.gl.dispose(); this.gl.forceContextLoss(); } catch { /* already gone */ }
+    this.ov.remove();
+  }
+
   resize() {
     const dpr = Math.min(devicePixelRatio || 1, 2);
     const w = Math.max(1, this.c.clientWidth), h = Math.max(1, this.c.clientHeight);
@@ -258,9 +313,7 @@ export class Renderer {
     this.gl.setSize(w, h, false);
     this.bakeVignette();
     this.camera.aspect = w / h;
-    // Portrait phones see less to the side; pull the camera up to compensate.
-    this.camOffset.set(0, 480, 310).multiplyScalar(this.camera.aspect < 1 ? 1.5 : this.camera.aspect < 1.4 ? 1.2 : 1);
-    this.camera.updateProjectionMatrix();
+    this.applyCamOffset();
     this.ov.width = Math.round(w * dpr);
     this.ov.height = Math.round(h * dpr);
   }
@@ -864,6 +917,7 @@ export class Renderer {
   }
   shape(s) { if (this.shapes.length < 60) { s.id = ++this.shapeSeq; this.shapes.push(s); } }
   float(f) {
+    if (!this.opt.floats) return;
     if (this.floats.length >= MAX_FLOATS) this.floats.shift();
     f.rise = 0;
     this.floats.push(f);
@@ -950,10 +1004,18 @@ export class Renderer {
 
   updateCamera(view, info, dt) {
     let tx, tz;
+    this.watching = info?.watching || 0;
     if (info) {
-      const me = view.players.find((p) => p.id === info.pid);
-      const src = me && !(me.flags & 1) ? me : me || view.players[0];
-      if (src) { tx = src.x; tz = src.y; }
+      if (info.followPos) {
+        // Free camera: the caller owns the point, we just chase it.
+        tx = info.followPos.x; tz = info.followPos.y;
+      } else {
+        const want = info.follow || info.pid;
+        const src = view.players.find((p) => p.id === want)
+          || view.players.find((p) => p.id === info.pid)
+          || view.players[0];
+        if (src) { tx = src.x; tz = src.y; }
+      }
     }
     if (tx === undefined) {
       // menu / spectating: slow orbit around the arena centre
@@ -972,8 +1034,9 @@ export class Renderer {
     const k = damp(dt, 5.5);
     this.camTarget.x += (tx - this.camTarget.x) * k;
     this.camTarget.z += (tz - this.camTarget.z) * k;
-    const sx = this.shake ? (Math.random() - 0.5) * this.shake * 1.6 : 0;
-    const sz = this.shake ? (Math.random() - 0.5) * this.shake * 1.6 : 0;
+    const amp = this.opt.shake ? this.shake : 0;
+    const sx = amp ? (Math.random() - 0.5) * amp * 1.6 : 0;
+    const sz = amp ? (Math.random() - 0.5) * amp * 1.6 : 0;
     this.camera.position.set(
       this.camTarget.x + this.camOffset.x + sx,
       this.camOffset.y,
@@ -1271,6 +1334,7 @@ export class Renderer {
       const isMe = info && p.id === info.pid;
       const name = info?.roster?.get(p.id)?.name || '';
       const dead = p.flags & 1;
+      const watched = this.watching && p.id === this.watching;
       if (dead) {
         const s = this.project(p.x, 20, p.y);
         if (!s) continue;
@@ -1289,11 +1353,22 @@ export class Renderer {
       g.fillStyle = hp < 0.3 ? '#ff5c5c' : hp < 0.6 ? '#ffc857' : '#7ee081';
       if (hp > 0.02) { roundRect(g, s.x - w / 2, by, w * hp, 5, 2.5); g.fill(); }
       if (name) {
-        g.font = `bold ${isMe ? 13 : 12}px system-ui, sans-serif`;
+        g.font = `bold ${isMe || watched ? 13 : 12}px system-ui, sans-serif`;
         g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,0.7)';
         g.strokeText(name, s.x, by - 5);
-        g.fillStyle = isMe ? '#ffffff' : 'rgba(220,225,240,0.85)';
+        g.fillStyle = watched ? '#ffc857' : isMe ? '#ffffff' : 'rgba(220,225,240,0.85)';
         g.fillText(name, s.x, by - 5);
+      }
+      // A bobbing caret says which potato the spectator camera is locked to -
+      // without it, switching targets is invisible until someone moves.
+      if (watched) {
+        const c = this.project(p.x, PLAYER_R * 2.5 + 30 + Math.sin(this.t * 4) * 4, p.y);
+        if (c) {
+          g.fillStyle = '#ffc857';
+          g.beginPath();
+          g.moveTo(c.x - 7, c.y - 8); g.lineTo(c.x + 7, c.y - 8); g.lineTo(c.x, c.y + 2);
+          g.closePath(); g.fill();
+        }
       }
     }
 

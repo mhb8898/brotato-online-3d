@@ -5,7 +5,15 @@
 // co-op everyone must see the same field or callouts are meaningless, and it
 // removes an entire class of "where is my teammate" problems. The canvas is
 // scaled to fit and letterboxed, so 1600x900 world units mean the same thing
-// on every machine.
+// on every machine. That also makes `setZoom` a no-op here and spectating
+// nearly free: everyone is already on screen, so a spectator only needs to be
+// told who to look at.
+//
+// This class is interchangeable with the Three.js Renderer in render3d.js -
+// the display setting swaps between them at runtime, so the two must keep the
+// same public surface:
+//   new Renderer(canvas)  draw(view, info, dt)  spawnFx(list)  toWorld(x, y)
+//   setZoom(z)  setOptions(o)  dispose()  .shake .flash .parts .floats
 //
 // Nothing here is loaded from disk - every sprite is drawn from primitives.
 // A deploy is therefore just HTML/CSS/JS with zero binary assets to 404.
@@ -518,12 +526,29 @@ export class Renderer {
     this.decalFade = 0;
     this.motes = [];
     this.menuActors = null;
+    this.opt = { shake: true, floats: true };
+    this.watching = 0;
     const mr = mulberry(7);
     for (let i = 0; i < 46; i++) {
       this.motes.push({ x: mr() * ARENA.w, y: mr() * ARENA.h, vx: (mr() - 0.5) * 14, vy: -6 - mr() * 10, r: 0.8 + mr() * 1.6, ph: mr() * TAU });
     }
     this.resize();
-    addEventListener('resize', () => this.resize());
+    this._onResize = () => this.resize();
+    addEventListener('resize', this._onResize);
+  }
+
+  /** No camera to move: the arena always fits the screen exactly. */
+  setZoom() { /* intentionally nothing */ }
+
+  setOptions(o) { Object.assign(this.opt, o); }
+
+  /** Drop the offscreen canvases and stop listening. See render3d's dispose. */
+  dispose() {
+    removeEventListener('resize', this._onResize);
+    this._floor = null;
+    this._decal = null;
+    this.parts.length = 0;
+    this.floats.length = 0;
   }
 
   resize() {
@@ -788,6 +813,7 @@ export class Renderer {
   }
 
   float(f) {
+    if (!this.opt.floats) return;
     if (this.floats.length >= MAX_FLOATS) this.floats.shift();
     this.floats.push(f);
   }
@@ -857,8 +883,9 @@ export class Renderer {
     g.fillStyle = '#05060a';
     g.fillRect(0, 0, this.c.clientWidth, this.c.clientHeight);
 
-    const sx = this.shake ? (Math.random() - 0.5) * this.shake : 0;
-    const sy = this.shake ? (Math.random() - 0.5) * this.shake : 0;
+    const amp = this.opt.shake ? this.shake : 0;
+    const sx = amp ? (Math.random() - 0.5) * amp : 0;
+    const sy = amp ? (Math.random() - 0.5) * amp : 0;
     g.save();
     g.translate(this.ox + sx, this.oy + sy);
     g.scale(this.scale, this.scale);
@@ -874,6 +901,7 @@ export class Renderer {
     }
 
     this.heavyProj = view.projs.length > TRAIL_PROJ_LIMIT;
+    this.watching = ctxInfo?.watching || 0;
 
     this.drawShadows(view);
     for (const p of view.pickups) this.drawPickup(p);
@@ -1046,6 +1074,7 @@ export class Renderer {
     const hurt = p.flags & 2;
     const inv = p.flags & 4;
     const isMe = info && p.id === info.pid;
+    const watched = this.watching && p.id === this.watching;
     const name = info?.roster?.get(p.id)?.name || '';
 
     if (dead) {
@@ -1072,9 +1101,9 @@ export class Renderer {
     const sq = Math.sin(tr.ph * 2) * 0.06 * moving;
     const lean = Math.sign(dx) * Math.min(0.18, Math.abs(dx) * 0.02) * moving;
 
-    if (isMe) {
-      g.strokeStyle = 'rgba(255,255,255,0.22)';
-      g.lineWidth = 2;
+    if (isMe || watched) {
+      g.strokeStyle = watched ? 'rgba(255,200,87,0.75)' : 'rgba(255,255,255,0.22)';
+      g.lineWidth = watched ? 2.5 : 2;
       g.setLineDash([5, 7]);
       g.beginPath(); g.arc(p.x, p.y + 2, 24, this.t * 1.5, this.t * 1.5 + TAU); g.stroke();
       g.setLineDash([]);
@@ -1097,11 +1126,11 @@ export class Renderer {
     g.fillStyle = hp < 0.3 ? '#ff5c5c' : hp < 0.6 ? '#ffc857' : '#7ee081';
     if (hp > 0.02) { roundRect(g, p.x - w / 2, by, w * hp, 5, 2.5); g.fill(); }
     if (name) {
-      g.font = `bold ${isMe ? 13 : 12}px system-ui, sans-serif`;
+      g.font = `bold ${isMe || watched ? 13 : 12}px system-ui, sans-serif`;
       g.textAlign = 'center';
       g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,0.7)';
       g.strokeText(name, p.x, p.y - 34);
-      g.fillStyle = isMe ? '#ffffff' : 'rgba(220,225,240,0.85)';
+      g.fillStyle = watched ? '#ffc857' : isMe ? '#ffffff' : 'rgba(220,225,240,0.85)';
       g.fillText(name, p.x, p.y - 34);
     }
   }

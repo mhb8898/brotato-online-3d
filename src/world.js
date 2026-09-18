@@ -96,6 +96,11 @@ export class World {
     this.grid = new Grid();
     this._scratch = [];
     this.result = null;
+    // Set by the owner of this World so a kick can also cut the wire. The
+    // simulation can drop a player from the roster but knows nothing about
+    // peer connections, and a kicked player who kept their data channel would
+    // simply be seated again by the next join.
+    this.onKick = null;
   }
 
   // =========================================================================
@@ -168,6 +173,7 @@ export class World {
     } else if (this.phase === PHASE.OVER && this.result) {
       this.send(id, { t: 'over', win: this.result.win, wave: this.wave, scores: this.scores(), danger: this.danger, endless: this.endless, canContinue: false });
     }
+    this.pushBuilds();
     this.pushLevel(p);
     return true;
   }
@@ -188,6 +194,42 @@ export class World {
         id: p.id, name: p.name, char: p.char, ready: p.ready, connected: p.connected,
       })),
     });
+  }
+
+  /**
+   * Everyone's build, for the spectator panel.
+   *
+   * Only sent when a build can have changed - a wave boundary - because a
+   * spectator watching a live fight needs to know what the potato they are
+   * following is carrying, and that answer is stable for a whole wave. Health
+   * and position are already in the 30 Hz snapshot; putting inventories there
+   * too would triple its size to restate something that never moves.
+   */
+  pushBuilds() {
+    this.send(null, {
+      t: 'builds',
+      players: [...this.players.values()].map((p) => ({
+        id: p.id, level: p.level,
+        weapons: p.weapons.map((w) => ({ id: w.id, lvl: w.lvl })),
+      })),
+    });
+  }
+
+  /**
+   * Throw a player out for good.
+   *
+   * Unlike a disconnect this must NOT leave a reclaimable slot behind: the
+   * whole point is that they do not come back. `removePlayer(id, true)` forgets
+   * the seat inside the simulation and `onKick` does the same on the wire.
+   */
+  kick(id) {
+    const p = this.players.get(id);
+    if (!p || id === this.hostId) return false;
+    const name = p.name;
+    this.removePlayer(id, true);
+    this.onKick?.(id, name);
+    this.send(null, { t: 'toast', kind: 'warn', msg: `${name} was removed by the host` });
+    return true;
   }
 
   // =========================================================================
@@ -241,6 +283,17 @@ export class World {
           for (const q of this.players.values()) { this.recomputeStats(q); this.pushYou(q); }
           this.pushLobby();
         }
+        break;
+      case 'kick':
+        // Moderation is the host's alone, and the host cannot kick themselves.
+        if (pid === this.hostId) this.kick(msg.id | 0);
+        break;
+      case 'forcestart':
+        // An AFK player should not be able to hold eight people hostage, so the
+        // host can close the lobby or the shop without a full house of readies.
+        if (pid !== this.hostId) break;
+        if (this.phase === PHASE.LOBBY && this.players.size) this.startRun();
+        else if (this.phase === PHASE.SHOP) this.startWave(this.wave + 1);
         break;
       case 'continue':
         // Past the win line the squad may keep going with everything they own.
@@ -373,6 +426,7 @@ export class World {
       danger: this.danger, endless: this.endless,
     });
     this.pushLobby();
+    this.pushBuilds();
     for (const p of this.players.values()) this.pushLevel(p);
   }
 

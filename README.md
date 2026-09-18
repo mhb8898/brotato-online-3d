@@ -2,7 +2,9 @@
 
 > **This is the 3D fork** of [Potato Royale](https://github.com/mhb8898/brotato-online).
 > The simulation, netcode and HUD are unchanged; the arena is drawn with
-> [Three.js](https://threejs.org/) instead of Canvas 2D (see `src/render3d.js`).
+> [Three.js](https://threejs.org/) (`src/render3d.js`) — but the original
+> Canvas 2D renderer (`src/render.js`) ships alongside it and either can be
+> picked in Settings, mid-wave, without a reload.
 > Play it at https://mhb8898.github.io/brotato-online-3d/
 
 A browser co-op arena-survival roguelite in the spirit of **Brotato** — waves of
@@ -115,9 +117,62 @@ pausing is exactly the behaviour you want.
   spectate until the next wave starts. Leaving on purpose forgets the seat.
 - Progress (best wave per character, unlocks) is saved in the browser.
 
-**Controls** — `WASD`/arrows move, `1`–`4` pick a level-up. You face the way
-you move and every weapon targets the nearest enemy on its own. Touch devices
-get a virtual stick.
+**Controls** — `WASD`/arrows move, `1`–`4` pick a level-up, `-`/`+` or the
+mouse wheel zoom. You face the way you move and every weapon targets the
+nearest enemy on its own. Touch devices get a virtual stick.
+
+---
+
+## Settings, spectating and the host's controls
+
+### Two renderers, one game
+
+The 3D and 2D renderers are interchangeable: same constructor, same
+`draw(view, info, dt)`, same particle and float lists. Settings swaps between
+them live, which means replacing the `<canvas>` element — a canvas hands out
+exactly one context for its lifetime, so asking a WebGL canvas for a `2d`
+context returns `null`. The outgoing renderer gives up its GPU resources on the
+way out; browsers cap how many live WebGL contexts a page may hold, and a
+player flipping the switch a few times must not exhaust that.
+
+Nothing about the choice is negotiated or sent anywhere. Two people in one room
+can play the same run in 2D and 3D at different zoom levels, and the host
+cannot tell. Zoom is 3D-only on purpose: the 2D view fits the whole arena on
+screen by construction, so there is nothing for a zoom control to do, and the
+slider says `n/a` rather than pretending otherwise.
+
+### Being dead is no longer boring
+
+Going down used to mean watching your own corpse for the rest of the wave —
+up to a minute of nothing at wave 14+. Now the camera moves to a teammate who
+is still up, with their health and the build they went into the wave with:
+
+- `A`/`D` or the arrows switch teammate; click a name in the spectator bar or
+  the team panel to jump straight to them.
+- `F` flies the camera yourself, anywhere in the arena.
+- Auto-spectate can be turned off if you would rather the moment you died stay
+  on screen.
+
+Builds travel as one small control message per wave boundary, because that is
+the only time a build can change. Health and position are already in the 30 Hz
+snapshot; putting inventories there too would triple its size to restate
+something that never moves.
+
+A spectator is just a camera. The host is never told one exists.
+
+### Kick and force-start
+
+The lobby's failure mode is social, not technical: one person walks away and
+seven wait. So the host can **start now** — from the lobby or the shop, without
+a full house of readies — and **remove** a player, behind a confirming second
+click.
+
+A kick has to outlive the disconnect it causes, or the kicked tab reconnects a
+second later, both automatically and by pressing Join again. Each tab mints one
+identity token for its lifetime; the host blocks that token for the life of the
+room. It is not proof against someone opening a new tab — with no server and no
+accounts there is nothing to check an identity against — and the goal is to end
+the disruption, not to win an arms race.
 
 ### Balance harness
 

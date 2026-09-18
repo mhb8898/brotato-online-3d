@@ -415,6 +415,124 @@ h1, h2, h3, h4 { line-height: 1.2; }
   font-size: 16px;
 }
 
+.mute.gear { right: 60px; font-size: 18px; line-height: 1; }
+
+/* ------------------------------ settings -------------------------------- */
+/* A modal, not a screen: settings can be opened mid-wave and the arena keeps
+   running behind it, like every other panel in this game. */
+.modal {
+  position: absolute; inset: 0; z-index: 35;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  background: rgba(4,5,10,.72); backdrop-filter: blur(3px);
+  overflow: auto;
+}
+.modal-card {
+  width: min(540px, 100%); background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 22px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.modal-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 10px; }
+.modal-head h2 { margin: 0; font-size: 24px; }
+
+.set-row {
+  display: flex; align-items: center; gap: 16px;
+  padding: 13px 0; border-top: 1px solid var(--line);
+}
+.set-row:first-of-type { border-top: 0; }
+.set-label { flex: 1; min-width: 0; }
+.set-label b { display: block; font-size: 14.5px; }
+.set-label small { display: block; color: var(--dim); font-size: 12.5px; line-height: 1.45; margin-top: 2px; }
+.set-row.disabled .set-label { opacity: .5; }
+.set-ctl { display: flex; align-items: center; gap: 10px; flex: none; }
+.set-ctl input[type=range] { width: 130px; accent-color: var(--accent); cursor: pointer; }
+.set-ctl input[type=range]:disabled { cursor: default; opacity: .4; }
+.set-ctl b { min-width: 46px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--dim); }
+
+/* Segmented control: two exclusive choices, one visibly current. */
+.seg { display: flex; flex: none; border: 1px solid var(--line-2); border-radius: 9px; overflow: hidden; }
+.seg button {
+  background: transparent; border: 0; padding: 8px 18px; cursor: pointer;
+  font-size: 13.5px; font-weight: 700; color: var(--dim);
+}
+.seg button:hover { background: var(--panel-3); color: var(--txt); }
+.seg button.on { background: var(--accent); color: var(--accent-ink); }
+
+.toggle {
+  flex: none; width: 46px; height: 26px; border-radius: 13px; cursor: pointer;
+  background: var(--well); border: 1px solid var(--line-2); padding: 0; position: relative;
+}
+.toggle i {
+  position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--faint); transition: left .13s ease, background .13s ease;
+}
+.toggle[aria-pressed=true] { background: rgba(255,200,87,.22); border-color: var(--accent); }
+.toggle[aria-pressed=true] i { left: 22px; background: var(--accent); }
+
+kbd {
+  font: inherit; font-size: 11.5px; font-weight: 700; padding: 1px 5px;
+  border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 5px;
+  background: var(--well);
+}
+
+/* ----------------------------- spectating ------------------------------- */
+/* Lives inside #hud, which is pointer-events:none, so anything clickable in
+   here has to opt back in. */
+.spectate {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+  width: min(420px, calc(100vw - 28px)); pointer-events: auto;
+  background: rgba(10,13,22,.93); border: 1px solid var(--line-2);
+  border-radius: var(--radius); padding: 10px 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.55);
+  transition: bottom .15s ease;
+}
+/* A downed player can still have a level-up to spend, and that panel owns the
+   bottom centre. Stack above it rather than letting it swallow the bar. The
+   panel's height is measured at render time - it wraps to two rows on a narrow
+   screen, so any constant here would be wrong on some display. */
+#app.lu-open .spectate { bottom: calc(var(--lu-h, 148px) + 32px); }
+.spec-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.spec-hint { font-size: 12px; color: var(--dim); text-align: right; }
+.spec-main { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.spec-main .btn.tiny { min-width: 32px; }
+.spec-who { flex: 1; min-width: 0; }
+.spec-name { display: flex; align-items: center; gap: 7px; font-size: 15px; }
+.spec-name .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.spec-name b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spec-bar { height: 6px; margin-top: 5px; border-radius: 3px; background: rgba(255,255,255,.12); overflow: hidden; }
+.spec-bar i { display: block; height: 100%; background: var(--good); transition: width .12s linear; }
+.spec-build { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.spec-build .lv { font-size: 11px; font-weight: 800; color: var(--accent); letter-spacing: .5px; }
+.spec-build .wp {
+  font-size: 11.5px; color: var(--dim); background: rgba(255,255,255,.07);
+  border-radius: 6px; padding: 1px 7px;
+}
+.spec-foot { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.spec-picks { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; min-width: 0; }
+.spec-pick {
+  display: flex; align-items: center; gap: 5px; cursor: pointer;
+  background: transparent; border: 1px solid var(--line-2); border-radius: 7px;
+  padding: 3px 8px; font-size: 12px; color: var(--dim);
+}
+.spec-pick:hover { background: var(--panel-3); color: var(--txt); }
+.spec-pick.on { border-color: var(--accent); color: var(--accent); }
+.spec-pick .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+/* While spectating, the teammate list doubles as a camera picker. */
+.team-panel.pickable .team-row { pointer-events: auto; cursor: pointer; }
+.team-panel.pickable .team-row:hover { border-color: var(--accent); }
+
+/* ------------------------- host moderation ------------------------------ */
+.player-list .kick {
+  margin-left: 6px; min-height: 24px; padding: 2px 8px; flex: none;
+  border-color: rgba(255,107,133,.45); color: #ffc4d0;
+}
+.player-list .kick:hover { background: rgba(255,107,133,.18); }
+.player-list .kick.armed { background: var(--bad); color: #2b0a12; border-color: var(--bad); }
+
+@media (max-width: 560px) {
+  .set-row { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .set-ctl input[type=range] { width: 180px; }
+}
+
 /* --------------------------- mobile stick ------------------------------- */
 .stick {
   position: absolute; z-index: 12; width: 128px; height: 128px; border-radius: 50%;

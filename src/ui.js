@@ -13,6 +13,7 @@ import {
 import { renderPortrait } from './render.js';
 import { renderIcon, paintStatIcons } from './icons.js';
 import * as progress from './progress.js';
+import { ZOOM_MIN, ZOOM_MAX } from './settings.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, html) => {
@@ -101,6 +102,10 @@ export class UI {
     this.cb = cb;
     this.selChar = 0;
     this.lastShopKey = '';
+    this.hostPid = 0;        // who may kick and force-start, per the last lobby msg
+    this.phase = 0;
+    this.kickArmed = 0;      // pid whose kick button is waiting for a confirming click
+    this.kickTimer = null;
     this.bind();
     this.buildChars();
   }
@@ -128,6 +133,36 @@ export class UI {
     $('btnMute').onclick = () => c.onMute();
 
     $('btnNetTest').onclick = () => c.onNetTest();
+    $('btnForceStart').onclick = () => c.onForceStart();
+    $('btnShopForce').onclick = () => c.onForceStart();
+
+    // ---- spectator bar
+    // Delegated, because the team rows are rebuilt from a string whenever a
+    // health bar moves and per-row handlers would not survive that.
+    $('teamPanel').onclick = (e) => {
+      const row = e.target.closest?.('.team-row');
+      if (row && $('teamPanel').classList.contains('pickable')) c.onSpectatePid(+row.dataset.pid);
+    };
+    $('specPrev').onclick = () => c.onSpectate(-1);
+    $('specNext').onclick = () => c.onSpectate(1);
+    $('specFree').onclick = () => c.onFreeCam();
+
+    // ---- settings
+    const openSettings = () => $('settings').classList.remove('hidden');
+    $('btnSettings').onclick = openSettings;
+    $('btnSettingsMenu').onclick = openSettings;
+    $('btnSettingsClose').onclick = () => $('settings').classList.add('hidden');
+    $('settings').onclick = (e) => { if (e.target.id === 'settings') $('settings').classList.add('hidden'); };
+    for (const b of $('setView').children) b.onclick = () => c.onSetting({ view: b.dataset.v });
+    $('setZoom').oninput = () => c.onSetting({ zoom: +$('setZoom').value });
+    for (const id of ['setShake', 'setFloats', 'setAutoSpectate']) {
+      $(id).onclick = () => c.onSetting({ [$(id).dataset.k]: $(id).getAttribute('aria-pressed') !== 'true' });
+    }
+    // Sound is stored inverted (muted), so the toggle reads the opposite way.
+    $('setSound').onclick = () => c.onMute();
+    addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') $('settings').classList.add('hidden');
+    });
 
     $('nameInput').value = localStorage.getItem('pr_name') || '';
     this.renderRecords();
@@ -166,6 +201,89 @@ export class UI {
       + res.lines.map((l) => `<span>${esc(l)}</span>`).join('');
   }
   joinError(text) { this.pane('menuJoin'); $('joinErr').textContent = text; }
+
+  // ----------------------------------------------------------- settings
+  /** Push the stored settings into the controls. One way only: the callbacks
+   *  write to the settings module, and the module calls back here. */
+  renderSettings(s) {
+    for (const b of $('setView').children) b.classList.toggle('on', b.dataset.v === s.view);
+    // The 2D view fits the whole arena on screen by construction, so there is
+    // nothing for a zoom control to do. Saying so beats a slider that lies.
+    $('setZoomRow').classList.toggle('disabled', s.view !== '3d');
+    $('setZoom').disabled = s.view !== '3d';
+    $('setZoom').min = ZOOM_MIN;
+    $('setZoom').max = ZOOM_MAX;
+    $('setZoom').value = s.zoom;
+    $('setZoomVal').innerHTML = s.view === '3d' ? `${s.zoom.toFixed(2)}&times;` : 'n/a';
+    const flag = (id, on) => $(id).setAttribute('aria-pressed', on ? 'true' : 'false');
+    flag('setShake', s.shake);
+    flag('setFloats', s.floats);
+    flag('setAutoSpectate', s.autoSpectate);
+    flag('setSound', !s.muted);
+    $('btnMute').textContent = s.muted ? '\u{1F507}' : '\u{1F50A}';
+  }
+
+  // ---------------------------------------------------------- spectating
+  /**
+   * The bar a downed player drives. Called every frame, so everything that
+   * does not change every frame is guarded by a key - rebuilding the teammate
+   * buttons 60 times a second would make them impossible to click.
+   */
+  renderSpectate(s) {
+    const box = $('spectate');
+    if (!s) {
+      box.classList.add('hidden');
+      $('teamPanel').classList.remove('pickable');
+      this._specKey = null;
+      return;
+    }
+    box.classList.remove('hidden');
+    $('teamPanel').classList.add('pickable');
+    $('specFree').classList.toggle('primary', s.free);
+
+    const back = s.timeLeft > 0 ? `back up in ${Math.ceil(s.timeLeft)}s` : 'back up at the shop';
+    $('specHint').textContent = s.free ? `Free camera - WASD to fly, F to follow again - ${back}` : back;
+
+    const t = s.target;
+    const hasTarget = !!t && !s.free;
+    $('specName').textContent = s.free ? 'Free camera' : (t ? t.name : 'Nobody left');
+    $('specDot').style.background = hasTarget ? (CHARACTERS[t.char] || CHARACTERS[0]).color : 'transparent';
+    // The free camera follows nobody, so there is no health to show.
+    box.querySelector('.spec-bar').classList.toggle('hidden', !hasTarget);
+    $('specHp').style.width = hasTarget ? `${Math.max(0, Math.min(1, t.hp / t.maxHp)) * 100}%` : '0%';
+    $('specPrev').disabled = s.count < 2;
+    $('specNext').disabled = s.count < 2;
+
+    // Their build, as of the start of this wave - it cannot change mid-wave.
+    const build = hasTarget ? t.build : null;
+    const bKey = hasTarget
+      ? `${t.id}|${build ? build.level : 0}|${build ? build.weapons.map((w) => `${w.id}${w.lvl}`).join(',') : ''}`
+      : 'none';
+    if (bKey !== this._specBuildKey) {
+      this._specBuildKey = bKey;
+      $('specBuild').innerHTML = build
+        ? `<span class="lv">LV ${build.level}</span>` + build.weapons
+          .map((w) => `<span class="wp">${esc(weaponName(w.id, w.lvl))}</span>`).join('')
+        : '';
+    }
+
+    const key = s.others.map((o) => o.id).join(',');
+    if (key !== this._specKey) {
+      this._specKey = key;
+      const picks = $('specPicks');
+      picks.innerHTML = '';
+      for (const o of s.others) {
+        const b = el('button', 'spec-pick');
+        b.dataset.pid = o.id;
+        b.innerHTML = `<span class="dot" style="background:${(CHARACTERS[o.char] || CHARACTERS[0]).color}"></span>${esc(o.name)}`;
+        b.onclick = () => this.cb.onSpectatePid(o.id);
+        picks.appendChild(b);
+      }
+    }
+    for (const b of $('specPicks').children) {
+      b.classList.toggle('on', !s.free && !!t && +b.dataset.pid === t.id);
+    }
+  }
   get playerName() { return ($('nameInput').value || '').trim().slice(0, 14) || 'Spud'; }
 
   // -------------------------------------------------------------- lobby
@@ -255,7 +373,10 @@ export class UI {
 
   setLobbySub(t) { $('lobbySub').textContent = t; }
 
-  renderPlayers(roster, myPid) {
+  renderPlayers(roster, myPid, hostPid = 0, phase = 0) {
+    this.hostPid = hostPid;
+    this.phase = phase;
+    const amHost = hostPid === myPid;
     const list = $('playerList');
     list.innerHTML = '';
     for (const [pid, p] of roster) {
@@ -265,11 +386,54 @@ export class UI {
         `<span class="dot" style="background:${ch.color}"></span>` +
         `<span>${esc(p.name)}${pid === myPid ? ' <small style="color:#98a0b5">(you)</small>' : ''}</span>` +
         `<span class="tick ${p.ready ? 'ok' : ''}">${p.connected === false ? 'away' : p.ready ? 'READY' : 'picking…'}</span>`;
+      if (amHost && pid !== myPid) li.appendChild(this.kickButton(pid, p.name));
       list.appendChild(li);
     }
     const me = roster.get(myPid);
     $('btnReady').textContent = me?.ready ? 'Not ready' : 'Ready';
     $('btnReady').classList.toggle('primary', !me?.ready);
+
+    // Waiting on someone who wandered off is the single most common way a
+    // lobby dies, so the host gets to close it without them.
+    const waiting = [...roster.values()].filter((p) => p.connected !== false && !p.ready).length;
+    const canForce = amHost && roster.size > 1;
+    $('btnForceStart').classList.toggle('hidden', !canForce);
+    $('btnForceStart').disabled = waiting === 0;
+    $('btnForceStart').textContent = waiting
+      ? `Start now (${waiting} not ready)` : 'Everyone is ready';
+  }
+
+  /**
+   * Kick, behind a confirming second click.
+   *
+   * A kick cannot be undone - the token is blocked for the life of the room -
+   * and it sits one row away from the character grid, so a bare button would
+   * eject a friend on a mis-click. A browser confirm() would do the job and
+   * also freeze the arena for every other player while the host reads it.
+   */
+  kickButton(pid, name) {
+    const armed = this.kickArmed === pid;
+    const b = el('button', `btn tiny kick ${armed ? 'armed' : ''}`, armed ? 'Sure?' : '&times;');
+    b.title = armed ? `Click again to remove ${name}` : `Remove ${name} from the room`;
+    b.onclick = (e) => {
+      e.stopPropagation();
+      clearTimeout(this.kickTimer);
+      if (this.kickArmed === pid) {
+        this.kickArmed = 0;
+        this.cb.onKick(pid);
+        return;
+      }
+      this.kickArmed = pid;
+      b.classList.add('armed');
+      b.textContent = 'Sure?';
+      this.kickTimer = setTimeout(() => {
+        if (this.kickArmed !== pid) return;
+        this.kickArmed = 0;
+        b.classList.remove('armed');
+        b.innerHTML = '&times;';
+      }, 3000);
+    };
+    return b;
   }
 
   // ---------------------------------------------------------------- HUD
@@ -318,7 +482,7 @@ export class UI {
       const down = p.flags & 1;
       const away = info.connected === false;
       html +=
-        `<div class="team-row ${down || away ? 'down' : ''}" title="${away ? 'Disconnected' : ''}">` +
+        `<div class="team-row ${down || away ? 'down' : ''}" data-pid="${p.id}" title="${away ? 'Disconnected' : ''}">` +
         `<div class="nm"><span class="dot" style="background:${ch.color}"></span>${esc(info.name)}${away ? ' <small>away</small>' : ''}</div>` +
         `<div class="bar"><i style="width:${down ? 100 : Math.round(Math.max(0, (p.hp / p.maxHp) * 100))}%"></i></div></div>`;
     }
@@ -355,6 +519,7 @@ export class UI {
     const me = roster.get(myPid);
     $('btnGo').textContent = me?.ready ? 'Waiting for others…' : 'Ready for next wave';
     $('btnGo').classList.toggle('primary', !me?.ready);
+    $('btnShopForce').classList.toggle('hidden', this.hostPid !== myPid || roster.size < 2);
 
     // Rebuilding the offer grid every frame would kill click targets mid-press,
     // so only redraw when something actually changed.
@@ -493,7 +658,10 @@ export class UI {
   // ----------------------------------------------------------- level up
   renderLevelup(msg) {
     const box = $('levelup');
-    if (!msg || !msg.options) { box.classList.add('hidden'); return; }
+    const open = !!(msg && msg.options);
+    // The spectator bar shares this corner of the screen and has to move.
+    $('app').classList.toggle('lu-open', open);
+    if (!open) { box.classList.add('hidden'); return; }
     box.classList.remove('hidden');
     $('luLevel').textContent = msg.level;
     $('luPending').textContent = msg.pending > 1 ? `(${msg.pending} pending)` : '';
@@ -509,6 +677,10 @@ export class UI {
       opts.appendChild(b);
     });
     paintStatIcons(opts);
+    // Measure after layout so the spectator bar can sit clear of this panel.
+    requestAnimationFrame(() => {
+      $('app').style.setProperty('--lu-h', `${Math.round(box.getBoundingClientRect().height)}px`);
+    });
   }
 
   // ---------------------------------------------------------- game over
