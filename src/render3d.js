@@ -24,6 +24,7 @@
 import * as THREE from 'three';
 import { ARENA, CHARACTERS, ENEMIES, WEAPONS, TIER_COLOR } from './data.js';
 import { FX, PROJ_KINDS } from './protocol.js';
+import { loadAssets } from './assets3d.js';
 
 const TAU = Math.PI * 2;
 const PLAYER_R = 14;
@@ -36,6 +37,9 @@ const MIN_DPR = 1;
 const OUTLINE_LIMIT = 34;
 const WALL_H = 42;
 const WALL_T = 26;
+const MAX_PROJ_ART = 160;     // per projectile kind, once the Blender models are in
+const MAX_WEAPON_INST = 48;   // per weapon model: 8 players x 6 weapons
+const WEAPON_SCALE = 1.0;     // weapon models are authored at potato scale
 
 // --------------------------------------------------------------- helpers
 function mulberry(seed) {
@@ -69,6 +73,42 @@ function roundRect(g, x, y, w, h, r) {
   g.closePath();
 }
 const damp = (dt, k) => 1 - Math.exp(-dt * k);
+/** Step angle a toward b by fraction k the short way round. */
+function lerpAngle(a, b, k) {
+  const d = ((b - a + Math.PI) % TAU + TAU) % TAU - Math.PI;
+  return a + d * k;
+}
+/** Which projectile a weapon fires; mirrors projKindFor() in world.js. */
+function projKindFor(id) {
+  switch (id) {
+    case 'shotgun': return 'pellet';
+    case 'laser': case 'sniper': return 'laser';
+    case 'rocket': return 'rocket';
+    case 'flamer': return 'flame';
+    case 'wand': return 'orb';
+    case 'shuriken': return 'star';
+    default: return 'bullet';
+  }
+}
+const STARTER = [];
+const RGB_CACHE = new Map();
+/** '#rrggbb' -> [r, g, b] in 0..1, memoised (particle colours repeat constantly). */
+function rgbOf(hex) {
+  let v = RGB_CACHE.get(hex);
+  if (!v) { const [r, g, b] = hex2rgb(hex); v = [r / 255, g / 255, b / 255]; RGB_CACHE.set(hex, v); }
+  return v;
+}
+// flame sprite colour by age, display (sRGB) values: white-hot, yellow,
+// orange, red, then the dark smoke it burns out into
+const FIRE = [[1, 0.96, 0.78], [1, 0.82, 0.32], [1, 0.56, 0.14], [0.92, 0.3, 0.08], [0.42, 0.16, 0.1], [0.16, 0.13, 0.14]];
+function fireRgb(age, out) {
+  const f = Math.min(0.999, age) * (FIRE.length - 1);
+  const i = Math.floor(f), t = f - i, a = FIRE[i], b = FIRE[i + 1];
+  out[0] = a[0] + (b[0] - a[0]) * t; out[1] = a[1] + (b[1] - a[1]) * t; out[2] = a[2] + (b[2] - a[2]) * t;
+  return out;
+}
+const FIRE_TMP = [0, 0, 0];
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
 /**
  * Merge several coloured copies of unit geometries into one indexed geometry
@@ -103,6 +143,10 @@ function mergeGeos(parts) {
   out.setIndex(idx);
   return out;
 }
+
+const GOLD = new THREE.Color('#ffd166');
+const WHITE = new THREE.Color('#ffffff');
+const ZERO_M = new THREE.Matrix4().makeScale(0, 0, 0);
 
 const PROJ_COLOR = {
   bullet: '#ffe9a8', pellet: '#ffb37a', laser: '#66f0ff', rocket: '#ff9f6b',
@@ -189,6 +233,7 @@ export class Renderer {
   constructor(canvas) {
     this.c = canvas;
     this.parts = [];      // point particles
+    this.partFree = [];   // recycled particle objects
     this.shapes = [];     // mesh particles: rings, glows, beams
     this.floats = [];     // damage numbers and text popups
     this.shake = 0;
@@ -216,7 +261,10 @@ export class Renderer {
     // On high-density screens the extra pixels already hide edges, and MSAA
     // on top of a 2x buffer is the single most expensive thing we could do.
     this.maxDpr = Math.min(devicePixelRatio || 1, 2);
-    this.dprCur = this.maxDpr;
+    // Retina screens start at 1.5x and earn 2x if frames have headroom: the
+    // modelled art costs more per pixel, and starting high means the first
+    // seconds of a wave stutter until the adapter catches up.
+    this.dprCur = Math.min(this.maxDpr, 1.5);
     this.gl = new THREE.WebGLRenderer({ canvas, antialias: this.maxDpr < 1.5, alpha: false, powerPreference: 'high-performance' });
     this.gl.shadowMap.enabled = true;
     this.gl.shadowMap.type = THREE.PCFShadowMap;
@@ -251,6 +299,23 @@ export class Renderer {
     this.buildArena();
     this.buildPools();
     this.buildParticles();
+
+    // Blender art (assets/*.glb) streams in after the first frame; until then,
+    // and forever if it fails, everything above draws the procedural shapes.
+    this.art = null;
+    this.disposed = false;
+    this.wst = new Map();          // pid -> floating weapon slots
+    this.prevProj = new Set();     // projectile ids seen last frame, to spot new shots
+    this.curProj = new Set();
+    this.shotKeys = new Set();     // owner+kind already credited with a shot this frame
+    this.swingSlots = new Map();   // live swing projectile id -> the melee slot swinging it
+    this.projBorn = new Map();     // projectile id -> render time first seen (flames age visibly)
+    this.firePts = [];             // this frame's flame sprites (drawn by firePoints)
+    this.firePool = [];            // their recycled records
+    this.lastView = null;
+    loadAssets()
+      .then((a) => { if (!this.disposed) this.useAssets(a); })
+      .catch((e) => console.warn('[render3d] art not loaded, keeping procedural shapes:', e?.message || e));
 
     this.resize();
     this._onResize = () => this.resize();
@@ -291,6 +356,7 @@ export class Renderer {
    * many live contexts a page may have.
    */
   dispose() {
+    this.disposed = true;
     removeEventListener('resize', this._onResize);
     this.scene.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
@@ -326,11 +392,12 @@ export class Renderer {
   adaptResolution(dt) {
     if (dt > 0.08) return;               // a stall (tab switch, GC), not a trend
     this.ftAcc += dt; this.ftN++;
-    if (this.ftAcc < 1) return;
+    if (this.ftAcc < 0.75) return;
     const avg = this.ftAcc / this.ftN;
     this.ftAcc = 0; this.ftN = 0;
     if (this.ftCooldown > 0) { this.ftCooldown--; return; }
-    if (avg > 1 / 50 && this.dprCur > MIN_DPR) {
+    // below ~56 fps averaged is already visible as judder, so step down then
+    if (avg > 1 / 56 && this.dprCur > MIN_DPR) {
       this.dprCur = Math.max(MIN_DPR, +(this.dprCur - 0.25).toFixed(2));
       this.gl.setPixelRatio(this.dprCur);
       this.ftGood = 0; this.ftCooldown = 1;
@@ -400,6 +467,146 @@ export class Renderer {
     }));
   }
 
+  /** Shared materials for baked Blender models; colour lives in the vertices. */
+  artMat(kind) {
+    return this.mat(`art-${kind}`, () => {
+      switch (kind) {
+        // no environment map in this scene, so real metalness would read as
+        // black; a little metalness and low roughness keeps the sheen
+        case 'metal': return new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.32, metalness: 0.35 });
+        case 'glow': return new THREE.MeshBasicMaterial({ vertexColors: true, fog: false });
+        case 'face': return new THREE.MeshBasicMaterial({ vertexColors: true });
+        case 'proj': return new THREE.MeshBasicMaterial({ vertexColors: true, fog: false });
+        default: return new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, metalness: 0.02 });
+      }
+    });
+  }
+
+  /** Remove every object a pool ever made (materials and geometry are shared, so kept). */
+  dropPool(pool) {
+    for (const o of pool.active.values()) this.scene.remove(o);
+    for (const o of pool.free) this.scene.remove(o);
+    pool.active.clear(); pool.free.length = 0;
+  }
+
+  /** Swap the procedural stand-ins for the Blender models, system by system. */
+  useAssets(a) {
+    this.art = a;
+    const S = this.scene;
+
+    // ---- floor: Blender-rendered flagstones plus a real height map
+    if (a.floor) {
+      a.floor.anisotropy = Math.min(8, this.gl.capabilities.getMaxAnisotropy());
+      const old = this.floorMat.map;
+      this.floorMat.map = a.floor;
+      this.floorMat.bumpMap = a.floorBump || a.floor;
+      this.floorMat.bumpScale = a.floorBump ? 2.4 : 1.6;
+      this.floorMat.needsUpdate = true;
+      old?.dispose();
+    }
+
+    // ---- walls, pillars, banners and props (1 Blender unit = 10 game units)
+    if (a.arena?.stone) {
+      for (const o of this.procArena) { S.remove(o); o.geometry?.dispose(); }
+      const stone = new THREE.Mesh(a.arena.stone, this.mat('arenaStone', () => new THREE.MeshStandardMaterial({
+        vertexColors: true, roughness: 0.88, metalness: 0.04,
+      })));
+      stone.scale.setScalar(10);
+      stone.castShadow = true; stone.receiveShadow = true;
+      S.add(stone);
+      if (a.arena.glow) {
+        const glow = new THREE.Mesh(a.arena.glow, this.artMat('glow'));
+        glow.scale.setScalar(10);
+        S.add(glow);
+      }
+    }
+
+    // ---- potatoes: rebuild the pools so new players get the modelled bodies
+    if (Object.keys(a.characters).length) {
+      for (const pool of this.playerPools) this.dropPool(pool);
+      this.playerPools = CHARACTERS.map((ch) => new Pool(S, () => this.makePlayer(ch)));
+    }
+
+    // ---- enemies: same instancing, modelled geometry
+    if (Object.keys(a.enemies).length) {
+      for (const it of this.enemyInst) { S.remove(it.body, it.face); it.body.dispose(); it.face.dispose(); }
+      this.buildEnemyInstances();
+    }
+
+    // ---- projectiles: one instanced mesh per modelled kind
+    this.projArt = {};
+    for (const [kind, geo] of Object.entries(a.projectiles)) {
+      if (kind === 'flame') continue;   // fire is drawn as sprites, see firePts
+      const m = new THREE.InstancedMesh(geo, this.artMat('proj'), MAX_PROJ_ART);
+      m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_PROJ_ART * 3), 3);
+      m.instanceColor.setUsage(THREE.DynamicDrawUsage);
+      m.count = 0; m.frustumCulled = false;
+      S.add(m);
+      this.projArt[kind] = m;
+    }
+
+    // ---- floating weapons: instanced per model and surface
+    this.wepInst = {};
+    for (const [id, w] of Object.entries(a.weapons)) {
+      const parts = [];
+      const add = (geo, mat, shadow) => {
+        const m = new THREE.InstancedMesh(geo, mat, MAX_WEAPON_INST);
+        m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        m.count = 0; m.frustumCulled = false; m.castShadow = shadow;
+        S.add(m);
+        return m;
+      };
+      for (const [kind, geo] of Object.entries(w.parts)) parts.push(add(geo, this.artMat(kind), false));
+      const spin = w.spin ? add(w.spin, this.artMat('metal'), false) : null;
+      this.wepInst[id] = { parts, spin, spinAt: w.spinAt, muzzle: w.muzzle, n: 0 };
+    }
+
+    // ---- effect meshes
+    if (a.fx.slash) {
+      this.dropPool(this.swingPool);
+      this.swingPool = new Pool(S, () => {
+        // vertex colours fade the trail: additive, so darker is more transparent
+        const m = new THREE.Mesh(a.fx.slash, this.mat('swingArt', () => new THREE.MeshBasicMaterial({
+          vertexColors: true, transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+        })));
+        m.position.y = PLAYER_R * 0.9;
+        return m;
+      });
+    }
+    const fxPool = (geo) => new Pool(S, () => new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      color: '#ffffff', transparent: true, opacity: 1, depthWrite: false, blending: THREE.AdditiveBlending, fog: false, side: THREE.DoubleSide,
+    })));
+    if (a.fx.muzzle) this.muzzlePool = fxPool(a.fx.muzzle);
+    if (a.fx.blast) this.blastPool = fxPool(a.fx.blast);
+
+    // ---- particle sprites
+    if (a.sprites) {
+      this.points.material.uniforms.uMap.value = a.sprites;
+      this.points.material.uniforms.uUseMap.value = 1;
+    }
+    this.warmShaders();
+  }
+
+  /**
+   * Compile every material the game can show, now, in the background.
+   *
+   * WebGL compiles a shader the first time something draws with it, and that
+   * blocks the frame: the first muzzle flash, explosion or slash of a run
+   * would each cost a visible hitch. Pools only create their meshes on first
+   * use, so borrow one of each, compile the whole scene (in parallel where the
+   * browser supports KHR_parallel_shader_compile), and let the next frame's
+   * sweeps put them away.
+   */
+  warmShaders() {
+    const pools = [this.muzzlePool, this.blastPool, this.swingPool, this.ringPool, this.glowPool, this.beamPool,
+      this.haloPool, this.windupPool, this.pickupPools[1], this.pickupPools[2], ...this.playerPools];
+    for (const p of pools) p?.get(-1);
+    const done = () => { for (const p of pools) p?.sweep(); };
+    const job = this.gl.compileAsync ? this.gl.compileAsync(this.scene, this.camera) : Promise.resolve(this.gl.compile(this.scene, this.camera));
+    job.then(done, done);
+  }
+
   buildLights() {
     const hemi = new THREE.HemisphereLight('#aebfe6', '#232636', 1.1);
     this.scene.add(hemi);
@@ -442,6 +649,7 @@ export class Renderer {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = Math.min(8, this.gl.capabilities.getMaxAnisotropy());
     const floorMat = new THREE.MeshStandardMaterial({ map: tex, bumpMap: tex, bumpScale: 1.6, roughness: 0.92, metalness: 0.02 });
+    this.floorMat = floorMat;
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(ARENA.w, ARENA.h), floorMat);
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(ARENA.w / 2, 0, ARENA.h / 2);
@@ -492,6 +700,7 @@ export class Renderer {
     const walls = new THREE.Mesh(mergeGeos(wallParts), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.04 }));
     walls.castShadow = true; walls.receiveShadow = true;
     this.scene.add(walls);
+    this.procArena = [walls];
 
     // ---- corner pillars with braziers
     const pillarMat = new THREE.MeshStandardMaterial({ color: '#343a55', roughness: 0.8 });
@@ -505,6 +714,7 @@ export class Renderer {
       const bowl = new THREE.Mesh(new THREE.CylinderGeometry(14, 8, 12, 12), bowlMat);
       bowl.position.set(b.x, WALL_H + 36, b.z);
       this.scene.add(bowl);
+      this.procArena.push(p, bowl);
       const flame = new THREE.Mesh(GEO.loSphere, this.glowMat('#ffb060'));
       flame.scale.set(9, 13, 9);
       flame.position.set(b.x, WALL_H + 48, b.z);
@@ -681,6 +891,24 @@ export class Renderer {
   }
 
   makePlayer(ch) {
+    const art = this.art?.characters?.[ch.name];
+    if (art?.skin) {
+      // Blender potato: skin keeps the swappable body material (hit / dead
+      // flash), the rest is baked accessories. Weapons float separately.
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(art.skin, this.bodyMat(ch.color));
+      body.castShadow = true; body.receiveShadow = true;
+      g.add(body);
+      for (const kind of ['matte', 'metal', 'glow', 'face']) {
+        if (!art[kind]) continue;
+        const m = new THREE.Mesh(art[kind], this.artMat(kind));
+        m.castShadow = kind === 'matte' || kind === 'metal';
+        g.add(m);
+      }
+      g.scale.setScalar(PLAYER_R);
+      g.userData = { body, ch, mark: 0 };
+      return g;
+    }
     const g = new THREE.Group();
     const body = new THREE.Mesh(GEO.sphere, this.bodyMat(ch.color));
     body.scale.set(1, 1.15, 0.92);
@@ -732,13 +960,21 @@ export class Renderer {
    */
   buildEnemyInstances() {
     this.enemyInst = ENEMIES.map((def, type) => {
-      const sc = ENEMY_SCALE[type] || [1, 1, 1];
-      const bodyGeo = (ENEMY_GEO[type] || GEO.sphere).clone();
-      bodyGeo.scale(sc[0], sc[1], sc[2]);
-      bodyGeo.translate(0, 1, 0);
-      const body = new THREE.InstancedMesh(bodyGeo, this.mat('ebody', () => new THREE.MeshStandardMaterial({
-        color: '#ffffff', roughness: 0.62, metalness: 0.05,
-      })), MAX_ENEMY_INST);
+      // Blender models are white-skinned with grey details, so the per-instance
+      // colour below tints them exactly like the plain shapes they replace.
+      const art = this.art?.enemies?.[def.name];
+      let bodyGeo;
+      if (art?.body) bodyGeo = art.body;
+      else {
+        const sc = ENEMY_SCALE[type] || [1, 1, 1];
+        bodyGeo = (ENEMY_GEO[type] || GEO.sphere).clone();
+        bodyGeo.scale(sc[0], sc[1], sc[2]);
+        bodyGeo.translate(0, 1, 0);
+      }
+      const bodyMat = art?.body
+        ? this.mat('ebodyArt', () => new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.62, metalness: 0.05 }))
+        : this.mat('ebody', () => new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.62, metalness: 0.05 }));
+      const body = new THREE.InstancedMesh(bodyGeo, bodyMat, MAX_ENEMY_INST);
       body.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       body.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_ENEMY_INST * 3), 3);
       body.instanceColor.setUsage(THREE.DynamicDrawUsage);
@@ -754,7 +990,7 @@ export class Renderer {
         { geo: GEO.loSphere, color: '#2a0810', scale: es * 0.5, pos: [0.9, 1.31, 0.37] },
       ];
       if (type === 5) parts.push({ geo: GEO.loSphere, color: '#ffd166', scale: 0.25, pos: [0, 2.1, 0] });
-      const face = new THREE.InstancedMesh(mergeGeos(parts), this.mat('eface', () => new THREE.MeshBasicMaterial({ vertexColors: true, fog: false })), MAX_ENEMY_INST);
+      const face = new THREE.InstancedMesh(art?.face || mergeGeos(parts), this.mat('eface', () => new THREE.MeshBasicMaterial({ vertexColors: true, fog: false })), MAX_ENEMY_INST);
       face.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       face.frustumCulled = false;
       face.count = 0;
@@ -772,36 +1008,64 @@ export class Renderer {
     this.pCol = new Float32Array(MAX_PARTS * 3);
     this.pSize = new Float32Array(MAX_PARTS);
     this.pAlpha = new Float32Array(MAX_PARTS);
+    this.pCell = new Float32Array(MAX_PARTS);
     geo.setAttribute('position', new THREE.BufferAttribute(this.pPos, 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('color', new THREE.BufferAttribute(this.pCol, 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('size', new THREE.BufferAttribute(this.pSize, 1).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('alpha', new THREE.BufferAttribute(this.pAlpha, 1).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('cell', new THREE.BufferAttribute(this.pCell, 1).setUsage(THREE.DynamicDrawUsage));
     geo.setDrawRange(0, 0);
     const mat = new THREE.ShaderMaterial({
       transparent: true, depthWrite: false, blending: THREE.NormalBlending,
-      uniforms: { uScale: { value: 1 } },
+      // uMap is the Blender sprite sheet (glow, smoke, star, ember); until it
+      // loads, particles are plain soft discs
+      uniforms: { uScale: { value: 1 }, uMap: { value: null }, uUseMap: { value: 0 } },
       vertexShader: `
-        attribute float size; attribute float alpha; attribute vec3 color;
-        varying vec3 vCol; varying float vA; uniform float uScale;
+        attribute float size; attribute float alpha; attribute vec3 color; attribute float cell;
+        varying vec3 vCol; varying float vA; varying float vCell; uniform float uScale;
         void main() {
-          vCol = color; vA = alpha;
+          vCol = color; vA = alpha; vCell = cell;
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
           gl_PointSize = size * uScale / -mv.z;
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: `
-        varying vec3 vCol; varying float vA;
+        varying vec3 vCol; varying float vA; varying float vCell;
+        uniform sampler2D uMap; uniform float uUseMap;
         void main() {
-          vec2 d = gl_PointCoord - 0.5;
-          float r = length(d) * 2.0;
-          if (r > 1.0) discard;
-          float a = smoothstep(1.0, 0.45, r) * vA;
+          float a;
+          if (uUseMap > 0.5) {
+            vec2 uv = vec2((gl_PointCoord.x + vCell) * 0.25, 1.0 - gl_PointCoord.y);
+            a = texture2D(uMap, uv).a * vA;
+          } else {
+            float r = length(gl_PointCoord - 0.5) * 2.0;
+            a = smoothstep(1.0, 0.45, r) * vA;
+          }
+          if (a < 0.01) discard;
           gl_FragColor = vec4(vCol, a);
         }`,
     });
     this.points = new THREE.Points(geo, mat);
     this.points.frustumCulled = false;
     this.scene.add(this.points);
+
+    // Flamethrower fire: same sprites, additive, so the jet glows instead of
+    // tinting the floor. Rebuilt every frame from firePts.
+    const MAX_FIRE = 200;
+    const fg = new THREE.BufferGeometry();
+    this.fire = { max: MAX_FIRE, pos: new Float32Array(MAX_FIRE * 3), col: new Float32Array(MAX_FIRE * 3),
+      size: new Float32Array(MAX_FIRE), alpha: new Float32Array(MAX_FIRE), cell: new Float32Array(MAX_FIRE) };
+    for (const [k, arr, n] of [['position', this.fire.pos, 3], ['color', this.fire.col, 3], ['size', this.fire.size, 1],
+      ['alpha', this.fire.alpha, 1], ['cell', this.fire.cell, 1]]) {
+      fg.setAttribute(k, new THREE.BufferAttribute(arr, n).setUsage(THREE.DynamicDrawUsage));
+    }
+    fg.setDrawRange(0, 0);
+    const fm = mat.clone();
+    fm.blending = THREE.AdditiveBlending;
+    fm.uniforms = mat.uniforms;   // share the sprite sheet uniforms
+    this.firePoints = new THREE.Points(fg, fm);
+    this.firePoints.frustumCulled = false;
+    this.scene.add(this.firePoints);
   }
 
   // -------------------------------------------------------------- decals
@@ -839,6 +1103,7 @@ export class Renderer {
           this.burst(f.x, f.y, 12, 4, '#ffd98a', 150, 0.22, 2, 'spark');
           break;
         case FX.EXPLODE:
+          this.shape({ kind: 'blast', x: f.x, y: f.y, r: f.a * 0.18, max: f.a * 0.5, life: 0.42, maxLife: 0.42, col: '#ff6a2a', rot: Math.random() * TAU });
           this.shape({ kind: 'ring', x: f.x, y: f.y, r: 6, max: f.a, life: 0.4, maxLife: 0.4, col: '#ffb070' });
           this.shape({ kind: 'glow', x: f.x, y: f.y, r: f.a * 0.6, life: 0.25, maxLife: 0.25, col: '#ffe0a0' });
           this.burst(f.x, f.y, 16, 14, '#ff7a3c', 340, 0.5, 4, 'spark');
@@ -849,6 +1114,7 @@ export class Renderer {
           this.flash = Math.max(this.flash, 0.35);
           break;
         case FX.BEAM:
+          this.teslaKick(f);
           this.shape({ kind: 'beam', x: f.x, y: f.y, x2: f.x2, y2: f.y2, life: 0.18, maxLife: 0.18, col: '#9ee6ff' });
           this.burst(f.x2, f.y2, 14, 4, '#c8f4ff', 120, 0.25, 2, 'spark');
           break;
@@ -867,6 +1133,7 @@ export class Renderer {
           this.burst(f.x, f.y, r * 0.8, Math.min(22, 6 + f.a / 5), col, 200, 0.5, 3, 'dot');
           this.burst(f.x, f.y, r * 0.8, Math.min(8, 3 + f.a / 12), shade(col, -0.3), 120, 0.7, 5, 'chunk');
           if (def) this.splat(f.x, f.y, Math.max(6, r * 0.7), shade(col, -0.25));
+          if (def && (def.boss || this.shapes.length < 40)) this.shape({ kind: 'blast', x: f.x, y: f.y, r: r * 0.35, max: r * (def.boss ? 2.2 : 0.75), life: def.boss ? 0.5 : 0.18, maxLife: def.boss ? 0.5 : 0.18, col, rot: Math.random() * TAU, soft: def.boss ? 1 : 0.5 });
           if (def?.boss) {
             this.shape({ kind: 'ring', x: f.x, y: f.y, r: 10, max: 220, life: 0.8, maxLife: 0.8, col });
             this.shape({ kind: 'glow', x: f.x, y: f.y, r: 70, life: 0.4, maxLife: 0.4, col });
@@ -901,7 +1168,7 @@ export class Renderer {
     const head = MAX_PARTS - this.parts.length;
     if (head <= 0) return;
     if (n > head) n = head;
-    const [r, g, b] = hex2rgb(col);
+    const rgb = rgbOf(col);
     for (let i = 0; i < n; i++) {
       const a = Math.random() * TAU;
       const s = spd * (0.4 + Math.random() * 0.6);
@@ -909,13 +1176,17 @@ export class Renderer {
         : kind === 'smoke' ? 25 + Math.random() * 30
           : kind === 'chunk' ? 120 + Math.random() * 160
             : (Math.random() - 0.3) * s * 0.8;
-      this.parts.push({
-        kind, x, y, h, vx: Math.cos(a) * s, vy: Math.sin(a) * s, vh: up,
-        life: life * (0.6 + Math.random() * 0.6), maxLife: life, size, r: r / 255, g: g / 255, b: b / 255,
-      });
+      // particles are recycled: a flamethrower makes hundreds a second, and
+      // fresh objects for each of them show up as garbage-collection hitches
+      const p = this.partFree.pop() || {};
+      p.kind = kind; p.x = x; p.y = y; p.h = h;
+      p.vx = Math.cos(a) * s; p.vy = Math.sin(a) * s; p.vh = up;
+      p.life = life * (0.6 + Math.random() * 0.6); p.maxLife = life; p.size = size;
+      p.r = rgb[0]; p.g = rgb[1]; p.b = rgb[2];
+      this.parts.push(p);
     }
   }
-  shape(s) { if (this.shapes.length < 60) { s.id = ++this.shapeSeq; this.shapes.push(s); } }
+  shape(s) { if (this.shapes.length < 90) { s.id = ++this.shapeSeq; this.shapes.push(s); } }
   float(f) {
     if (!this.opt.floats) return;
     if (this.floats.length >= MAX_FLOATS) this.floats.shift();
@@ -924,10 +1195,16 @@ export class Renderer {
   }
 
   stepFx(dt) {
-    for (let i = this.parts.length - 1; i >= 0; i--) {
-      const p = this.parts[i];
+    const parts = this.parts;
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const p = parts[i];
       p.life -= dt;
-      if (p.life <= 0) { this.parts.splice(i, 1); continue; }
+      if (p.life <= 0) {
+        // swap-remove: draw order of particles does not matter
+        parts[i] = parts[parts.length - 1]; parts.pop();
+        this.partFree.push(p);
+        continue;
+      }
       switch (p.kind) {
         case 'dot': case 'spark':
           p.x += p.vx * dt; p.y += p.vy * dt; p.h += p.vh * dt;
@@ -953,7 +1230,7 @@ export class Renderer {
       const s = this.shapes[i];
       s.life -= dt;
       if (s.life <= 0) { this.shapes.splice(i, 1); continue; }
-      if (s.kind === 'ring') s.r += (s.max - s.r) * Math.min(1, dt * 9);
+      if (s.kind === 'ring' || s.kind === 'blast') s.r += (s.max - s.r) * Math.min(1, dt * 9);
     }
     for (let i = this.floats.length - 1; i >= 0; i--) {
       const f = this.floats[i];
@@ -981,12 +1258,14 @@ export class Renderer {
       this.lastPhase = view.phase;
     }
 
+    this.lastView = view;
     this.updateCamera(view, info, dt);
     this.updateBraziers();
 
     this.syncPlayers(view, info);
     this.syncEnemies(view);
     this.syncProjectiles(view);
+    this.syncWeapons(view, info);
     this.syncPickups(view);
     this.syncShapes();
     this.syncParticles();
@@ -999,6 +1278,7 @@ export class Renderer {
     if (this.trk.size > view.players.length) {
       const alive = new Set(view.players.map((p) => p.id));
       for (const id of this.trk.keys()) if (!alive.has(id)) this.trk.delete(id);
+      for (const id of this.wst.keys()) if (!alive.has(id)) this.wst.delete(id);
     }
   }
 
@@ -1075,7 +1355,16 @@ export class Renderer {
 
       // walk cycle from observed speed
       let tr = this.trk.get(p.id);
-      if (!tr) { tr = { x: p.x, y: p.y, spd: 0, ph: 0 }; this.trk.set(p.id, tr); }
+      if (!tr) { tr = { x: p.x, y: p.y, spd: 0, ph: 0, face: p.ang, aim: p.ang, hasAim: false }; this.trk.set(p.id, tr); }
+      // Turn to face the gun's target: the nearest enemy in weapon reach.
+      // With nothing to shoot, face the way we walk as before.
+      let best = 720 * 720;
+      tr.hasAim = false;
+      for (const e of view.enemies) {
+        const ex = e.x - p.x, ey = e.y - p.y, d = ex * ex + ey * ey;
+        if (d < best) { best = d; tr.aim = Math.atan2(ey, ex); tr.hasAim = true; }
+      }
+      tr.face = lerpAngle(tr.face, tr.hasAim ? tr.aim : p.ang, damp(this.dt, 10));
       const dx = p.x - tr.x, dy = p.y - tr.y;
       const inst = this.dt > 0 ? Math.hypot(dx, dy) / this.dt : 0;
       tr.spd += (Math.min(inst, 400) - tr.spd) * Math.min(1, this.dt * 12);
@@ -1086,9 +1375,10 @@ export class Renderer {
       const sq = Math.sin(tr.ph * 2) * 0.06 * moving;
 
       g.position.set(p.x, bob, p.y);
-      g.rotation.set(0, -p.ang, 0);
+      g.rotation.set(0, -tr.face, 0);
       g.scale.set(PLAYER_R * (1 + sq), PLAYER_R * (1 - sq), PLAYER_R * (1 + sq));
       ud.body.material = this.bodyMat(ch.color, hurt ? 'hit' : '');
+      if (ud.arm) ud.arm.visible = !this.wepInst;
       g.visible = !(inv && !hurt) || Math.sin(this.t * 40) > -0.4;
 
       if (isMe) {
@@ -1099,6 +1389,197 @@ export class Renderer {
     }
     this.meRing.visible = meSeen;
     for (const pool of this.playerPools) pool.sweep();
+  }
+
+  // ------------------------------------------------------------- weapons
+  /**
+   * What a player is carrying. The local player's list is live (the 'you'
+   * message); everyone else's comes from the per-wave build summary, and a
+   * player we know nothing about yet holds their character's starter.
+   */
+  weaponsOf(p, info) {
+    if (info && p.id === info.pid && info.you?.weapons?.length) return info.you.weapons;
+    const b = info?.builds?.get?.(p.id);
+    if (b?.weapons?.length) return b.weapons;
+    const ch = CHARACTERS[p.char] || CHARACTERS[0];
+    return STARTER[ch.id] || (STARTER[ch.id] = [{ id: ch.weapon, lvl: 1 }]);
+  }
+
+  slotsFor(p, list) {
+    let key = '';
+    for (const w of list) key += `${w.id}:${w.lvl || 1},`;
+    let st = this.wst.get(p.id);
+    if (!st || st.key !== key) {
+      const old = st?.slots || [];
+      st = {
+        key,
+        slots: list.map((w, i) => ({
+          id: w.id, lvl: w.lvl || 1, ang: old[i]?.ang ?? p.ang,
+          kick: 0, swing: 0, swingNow: 0, spin: 0, spinV: 0, lastShot: -1,
+          mx: p.x, my: p.y, mh: PLAYER_R,
+        })),
+      };
+      this.wst.set(p.id, st);
+    }
+    return st.slots;
+  }
+
+  /**
+   * Brotato-style: each weapon floats in its own slot around the potato and
+   * turns to the nearest enemy. The simulation does its own targeting per
+   * weapon; this only has to look right, and a real shot snaps the gun onto
+   * the bullet's heading anyway (see onShot).
+   */
+  syncWeapons(view, info) {
+    const W = this.wepInst;
+    if (!W) return;
+    for (const id in W) W[id].n = 0;
+    const m = this._m, q = this._q, sc = this._s, pos = this._v;
+    const m2 = this._wm || (this._wm = new THREE.Matrix4());
+    const m3 = this._wm3 || (this._wm3 = new THREE.Matrix4());
+    const dt = this.dt;
+    for (const p of view.players) {
+      if (p.flags & 1) continue;
+      const slots = this.slotsFor(p, this.weaponsOf(p, info));
+      let best = 720 * 720, tx = 0, ty = 0, has = false;
+      for (const e of view.enemies) {
+        const dx = e.x - p.x, dy = e.y - p.y, d = dx * dx + dy * dy;
+        if (d < best) { best = d; tx = e.x; ty = e.y; has = true; }
+      }
+      const face = this.trk.get(p.id)?.face ?? p.ang;
+      const inv = p.flags & 4, hurt = p.flags & 2;
+      const visible = !(inv && !hurt) || Math.sin(this.t * 40) > -0.4;
+      const ns = slots.length;
+      const bob = Math.sin(this.t * 3 + p.id) * 1.6;
+      for (let i = 0; i < ns; i++) {
+        const sl = slots[i];
+        const wi = W[sl.id];
+        if (!wi || wi.n >= MAX_WEAPON_INST) continue;
+        const def = WEAPONS[sl.id];
+        const R = PLAYER_R * (ns === 1 ? 1.45 : 1.75);
+        // one weapon is held out in front; more form a ring that turns with the body,
+        // starting at the front-right hand and going round
+        const slotA = ns === 1 ? face + 0.5 : face + 0.5 + (i / ns) * TAU;
+        let wx = p.x + Math.cos(slotA) * R, wy = p.y + Math.sin(slotA) * R;
+        const want = has ? Math.atan2(ty - wy, tx - wx) : face;
+        sl.ang = lerpAngle(sl.ang, want, damp(dt, 12));
+        let ang = sl.ang;
+        if (sl.swing > 0) {
+          // the swing projectile's angle sweeps across the arc (world.js);
+          // the blade rides it out in front, narrow arcs as a thrust
+          const arc = def?.arc || 1.5;
+          const reach = Math.sin(Math.min(1, sl.swing) * Math.PI * 0.5) * PLAYER_R * (arc < 0.8 ? 1.3 : 0.75);
+          ang = sl.swingNow;
+          wx = p.x + Math.cos(ang) * (R * 0.8 + reach); wy = p.y + Math.sin(ang) * (R * 0.8 + reach);
+          sl.swing = Math.max(0, sl.swing - dt / 0.22);
+          if (sl.swing === 0) sl.ang = ang;
+        }
+        if (sl.kick > 0) {
+          const kk = sl.kick * PLAYER_R * 0.38;
+          wx -= Math.cos(ang) * kk; wy -= Math.sin(ang) * kk;
+          sl.kick *= Math.exp(-dt * 16);
+          if (sl.kick < 0.01) sl.kick = 0;
+        }
+        const h = PLAYER_R * 0.95 + bob;
+        const s = PLAYER_R * WEAPON_SCALE * (1 + (sl.lvl - 1) * 0.07);
+        q.setFromAxisAngle(Y_AXIS, sl.id === 'shuriken' ? this.t * 9 + i : -ang);
+        pos.set(wx, h, wy);
+        sc.set(s, s, s);
+        if (visible) m.compose(pos, q, sc); else m.copy(ZERO_M);
+        for (const part of wi.parts) part.setMatrixAt(wi.n, m);
+        if (wi.spin) {
+          sl.spinV *= Math.exp(-dt * 2.5);
+          sl.spin += (2 + sl.spinV) * dt;
+          m3.makeRotationX(sl.spin).setPosition(wi.spinAt);
+          m2.multiplyMatrices(m, m3);
+          wi.spin.setMatrixAt(wi.n, m2);
+        }
+        wi.n++;
+        // remember where the muzzle is, for the flash when this gun fires
+        const mz = wi.muzzle, ca = Math.cos(ang), sa = Math.sin(ang);
+        sl.mx = wx + s * (mz.x * ca - mz.z * sa);
+        sl.my = wy + s * (mz.x * sa + mz.z * ca);
+        sl.mh = h + s * mz.y;
+      }
+    }
+    for (const id in W) {
+      const wi = W[id];
+      for (const part of wi.parts) { part.count = wi.n; if (wi.n) part.instanceMatrix.needsUpdate = true; }
+      if (wi.spin) { wi.spin.count = wi.n; if (wi.n) wi.spin.instanceMatrix.needsUpdate = true; }
+    }
+  }
+
+  firePt(x, y, h, r, age, cell, a) {
+    const f = this.firePool.pop() || {};
+    f.x = x; f.y = y; f.h = h; f.r = r; f.age = age; f.cell = cell; f.a = a;
+    this.firePts.push(f);
+  }
+
+  /** A projectile we have not seen before: find the gun that fired it and kick it. */
+  onShot(view, b, kind) {
+    if (!this.wepInst) return;
+    const back = kind === 'swing' ? 0 : 18 + (b.size || 6);
+    const ox = b.x - Math.cos(b.ang) * back, oy = b.y - Math.sin(b.ang) * back;
+    let best = 95 * 95, owner = null;
+    for (const p of view.players) {
+      if (p.flags & 1) continue;
+      const dx = p.x - ox, dy = p.y - oy, d = dx * dx + dy * dy;
+      if (d < best) { best = d; owner = p; }
+    }
+    if (!owner) return;
+    // a shotgun volley is six projectiles in one frame but one trigger pull
+    const key = owner.id * 16 + PROJ_KINDS.indexOf(kind);
+    if (this.shotKeys.has(key)) return;
+    this.shotKeys.add(key);
+    const st = this.wst.get(owner.id);
+    if (!st) return;
+    let pick = null;
+    for (const sl of st.slots) {
+      const def = WEAPONS[sl.id];
+      if (!def || (def.cls === 'melee' ? 'swing' : projKindFor(sl.id)) !== kind) continue;
+      if (!pick || sl.lastShot < pick.lastShot) pick = sl;
+    }
+    if (!pick) return;
+    pick.lastShot = this.t;
+    if (kind === 'swing') {
+      pick.swing = 1; pick.swingNow = b.ang;
+      this.swingSlots.set(b.id, pick);
+      return;
+    }
+    pick.kick = 1; pick.ang = b.ang; pick.spinV = 30;
+    this.muzzleFlash(pick, b.ang);
+  }
+
+  /** Chain lightning has no projectile, so its first link stands in for the shot. */
+  teslaKick(f) {
+    if (!this.wepInst || !this.lastView) return;
+    for (const p of this.lastView.players) {
+      if (Math.hypot(p.x - f.x, p.y - f.y) > 30) continue;
+      const sl = this.wst.get(p.id)?.slots.find((w) => w.id === 'tesla');
+      if (!sl) return;
+      sl.kick = 0.6; sl.ang = Math.atan2(f.y2 - f.y, f.x2 - f.x); sl.lastShot = this.t;
+      this.muzzleFlash(sl, sl.ang);
+      return;
+    }
+  }
+
+  muzzleFlash(sl, ang) {
+    const col = WEAPONS[sl.id]?.color || '#ffe9a8';
+    const big = sl.id === 'shotgun' || sl.id === 'rocket' || sl.id === 'sniper';
+    const small = sl.id === 'smg' || sl.id === 'minigun' || sl.id === 'flamer';
+    if (sl.id === 'flamer') {
+      // no star flash for a flamethrower: a small ball of fire at the nozzle
+      this.shape({ kind: 'blast', x: sl.mx, y: sl.my, r: PLAYER_R * 0.12, max: PLAYER_R * 0.34, life: 0.1, maxLife: 0.1,
+        col: '#ff6a1f', core: '#ffc04a', rot: Math.random() * TAU, soft: 0.9, h: sl.mh });
+      return;
+    }
+    if (this.muzzlePool) {
+      this.shape({
+        kind: 'muzzle', x: sl.mx, y: sl.my, h: sl.mh, ang,
+        r: PLAYER_R * (big ? 1.6 : small ? 0.95 : 1.2), life: 0.07, maxLife: 0.07, col,
+      });
+    }
+    this.burst(sl.mx, sl.my, sl.mh, big ? 4 : 2, col, big ? 140 : 90, 0.2, 1.6, 'spark');
   }
 
   // ------------------------------------------------------------- enemies
@@ -1157,12 +1638,27 @@ export class Renderer {
   // --------------------------------------------------------- projectiles
   syncProjectiles(view) {
     const inst = this.projInst, halo = this.projHalo;
+    const art = this.projArt;
+    if (art) for (const k in art) art[k].count = 0;
     let n = 0;
     const m = this._m, q = this._q, s = this._s, col = this._col, pos = this._v;
     const yAxis = this._v2.set(0, 1, 0);
+    // New ids are fresh shots: they drive weapon recoil and muzzle flashes.
+    const seen = this.curProj;
+    seen.clear();
+    this.shotKeys.clear();
+    for (const f of this.firePts) this.firePool.push(f);
+    this.firePts.length = 0;
+    const first = this.prevProj.size === 0 && !this.projPrimed;
+    this.projPrimed = true;
     for (const b of view.projs) {
       const kind = PROJ_KINDS[b.type] || 'bullet';
+      seen.add(b.id);
+      if (!this.prevProj.has(b.id)) this.projBorn.set(b.id, this.t);
+      if (!first && !this.prevProj.has(b.id) && !(b.flags & 1)) this.onShot(view, b, kind);
       if (kind === 'swing') {
+        const sl = this.swingSlots.get(b.id);
+        if (sl) { sl.swingNow = b.ang; sl.swing = Math.max(sl.swing, 0.35); }
         const sw = this.swingPool.get(b.id);
         sw.position.set(b.x, PLAYER_R * 0.9, b.y);
         sw.rotation.y = -b.ang;
@@ -1174,7 +1670,7 @@ export class Renderer {
       const hostile = b.flags & 1;
       // b.size is the 2D hit radius; the drawn body is a bit tighter than that
       const sr = b.size * 0.5;
-      let sx = sr, sy = sr, sz = sr, h = 14;
+      let sx = sr, sy = sr, sz = sr, h = 14, flame = 0;
       switch (kind) {
         case 'bullet': sx = sr * 3; sy = sz = sr * 0.9; break;
         case 'pellet': sx = sr * 1.7; sy = sz = sr * 0.8; break;
@@ -1182,7 +1678,30 @@ export class Renderer {
         case 'rocket': sx = sr * 2.6; sy = sz = sr * 1.2; h = 16;
           if (Math.random() < 0.6) this.burst(b.x - Math.cos(b.ang) * 14, b.y - Math.sin(b.ang) * 14, 16, 1, '#5a5a66', 20, 0.7, 5, 'smoke');
           break;
-        case 'flame': { const f = sr * 1.5 + Math.random() * 2.5; sx = sy = sz = f; h = 10 + Math.random() * 8; break; }
+        case 'flame': {
+          // A flame lives ~0.7 s: it swells, lifts, and cools from white-hot
+          // through orange and red into smoke. Drawn as soft noisy sprites
+          // (the particle shader is not tone-mapped, so the oranges stay vivid).
+          const age = Math.min(1, (this.t - (this.projBorn.get(b.id) ?? this.t)) / 0.7);
+          flame = sr * (2.6 + age * 5.5) * (0.85 + Math.random() * 0.3);
+          h = 11 + age * 18 + Math.random() * 3;
+          if (this.firePts.length < 196) {
+            const fade = Math.pow(1 - age, 0.35);
+            const bx = b.x - Math.cos(b.ang) * flame * 0.9, by = b.y - Math.sin(b.ang) * flame * 0.9;
+            this.firePt(b.x, b.y, h, flame * 1.35, age, 0, fade * 0.4);                         // soft glow body
+            this.firePt(b.x, b.y, h, flame, age, 1, fade * 0.8);                                // licking edge
+            this.firePt(bx, by, h - 2, flame * 0.8, Math.max(0, age - 0.06), 1, fade * 0.6);    // fills the gap behind
+            if (age < 0.45) this.firePt(b.x, b.y, h + 1, flame * 0.55, 0, 0, 0.6 * (1 - age / 0.45));
+          }
+          // the gaps between puffs fill with glowing fire motes; old fire smokes
+          if (Math.random() < 0.7) {
+            this.burst(b.x + (Math.random() - 0.5) * flame, b.y + (Math.random() - 0.5) * flame, h, 1,
+              age < 0.35 ? '#ffc04a' : age < 0.7 ? '#ff7a2a' : '#e0481c', 40, 0.3, 5 + age * 6, 'dot');
+          }
+          if (age > 0.55 && Math.random() < 0.08) this.burst(b.x, b.y, h + 6, 1, '#3b3036', 18, 0.9, 6, 'smoke');
+          if (Math.random() < 0.04) this.burst(b.x, b.y, h, 1, '#ffb347', 90, 0.35, 1.4, 'spark');
+          continue;   // no mesh, no halo
+        }
         case 'orb': sx = sy = sz = sr * 1.6; break;
         case 'star': sx = sz = sr * 1.8; sy = sr * 0.5; break;
         case 'enemy': sx = sy = sz = sr * 1.6; break;
@@ -1191,15 +1710,37 @@ export class Renderer {
       }
       q.setFromAxisAngle(yAxis, kind === 'star' ? this.t * 10 : -b.ang);
       pos.set(b.x, h, b.y);
-      s.set(sx, sy, sz);
-      m.compose(pos, q, s);
-      inst.setMatrixAt(n, m);
-      inst.setColorAt(n, col);
-      s.multiplyScalar(hostile ? 1.8 : 1.5);
+      const model = art?.[kind];
+      if (model && model.count < MAX_PROJ_ART) {
+        // modelled projectile: uniform scale, its own colours, gold on crits
+        const k = flame || sr;
+        if (flame) q.setFromAxisAngle(yAxis, -b.ang + b.id * 1.7 + this.t * 3);   // tumbling puffs
+        s.set(k, k * 0.85, k);
+        m.compose(pos, q, s);
+        model.setMatrixAt(model.count, m);
+        model.setColorAt(model.count, flame ? col : b.flags & 2 ? GOLD : WHITE);
+        model.count++;
+        inst.setMatrixAt(n, ZERO_M);   // its halo slot stays; the plain sphere is hidden
+      } else {
+        s.set(sx, sy, sz);
+        m.compose(pos, q, s);
+        inst.setMatrixAt(n, m);
+        inst.setColorAt(n, col);
+      }
+      s.set(sx, sy, sz).multiplyScalar(hostile ? 1.8 : flame ? 1.15 : 1.5);
       m.compose(pos, q, s);
       halo.setMatrixAt(n, m);
       halo.setColorAt(n, col);
       n++;
+    }
+    for (const id of this.swingSlots.keys()) if (!seen.has(id)) this.swingSlots.delete(id);
+    for (const id of this.projBorn.keys()) if (!seen.has(id)) this.projBorn.delete(id);
+    [this.prevProj, this.curProj] = [this.curProj, this.prevProj];
+    if (art) {
+      for (const k in art) {
+        const mm = art[k];
+        if (mm.count) { mm.instanceMatrix.needsUpdate = true; mm.instanceColor.needsUpdate = true; }
+      }
     }
     inst.count = n; halo.count = n;
     inst.instanceMatrix.needsUpdate = true; halo.instanceMatrix.needsUpdate = true;
@@ -1268,9 +1809,26 @@ export class Renderer {
         m.scale.set(len, 2 + a * 5, 2 + a * 5);
         m.material.color.set(s.col);
         m.material.opacity = a;
+      } else if (s.kind === 'muzzle' && this.muzzlePool) {
+        const m = this.muzzlePool.get(id);
+        m.position.set(s.x, s.h, s.y);
+        m.rotation.set(0, -s.ang, 0);
+        const k = s.r * (0.75 + (1 - a) * 0.5);
+        m.scale.set(k, s.r, s.r * (0.6 + a * 0.5));
+        m.material.color.set(s.col);
+        m.material.opacity = Math.min(1, a * 1.6);
+      } else if (s.kind === 'blast' && this.blastPool) {
+        // fireball: white-hot core cooling to the event colour as it swells
+        const m = this.blastPool.get(id);
+        m.position.set(s.x, s.h ?? s.r * 0.55, s.y);
+        m.rotation.set(0, s.rot || 0, 0);
+        m.scale.set(s.r, s.r * 0.85, s.r);
+        m.material.color.set(s.core || '#fff2c8').lerp(this._col.set(s.col), Math.min(1, (1 - a) * 1.6));
+        m.material.opacity = a * 0.85 * (s.soft || 1);
       }
     }
     this.ringPool.sweep(); this.glowPool.sweep(); this.beamPool.sweep();
+    this.muzzlePool?.sweep(); this.blastPool?.sweep();
   }
 
   syncParticles() {
@@ -1281,12 +1839,32 @@ export class Renderer {
       this.pPos[i * 3] = p.x; this.pPos[i * 3 + 1] = p.h; this.pPos[i * 3 + 2] = p.y;
       this.pCol[i * 3] = p.r; this.pCol[i * 3 + 1] = p.g; this.pCol[i * 3 + 2] = p.b;
       // sizes are world units at the projection reference distance
-      this.pSize[i] = p.size * (p.kind === 'spark' ? 1.4 : p.kind === 'smoke' ? 2.2 : 1.8) * 420 * this.dpr;
+      // sprite cells: 0 glow, 1 smoke, 2 star, 3 ember; soft sprites draw a
+      // little larger than the hard discs they replace
+      const cell = p.kind === 'smoke' ? 1 : p.kind === 'rise' ? 2 : p.kind === 'chunk' ? 3 : 0;
+      this.pCell[i] = cell;
+      const grow = this.art?.sprites ? (cell === 2 ? 2.2 : cell === 0 ? 1.35 : 1.15) : 1;
+      this.pSize[i] = p.size * (p.kind === 'spark' ? 1.4 : p.kind === 'smoke' ? 2.2 : 1.8) * 420 * this.dpr * grow;
       this.pAlpha[i] = p.kind === 'smoke' ? a * 0.45 : Math.min(1, a * 1.6);
     }
+    const F = this.fire;
+    let k = 0;
+    for (const f of this.firePts) {
+      if (k >= F.max) break;
+      const c = fireRgb(f.age, FIRE_TMP);
+      F.pos[k * 3] = f.x; F.pos[k * 3 + 1] = f.h; F.pos[k * 3 + 2] = f.y;
+      F.col[k * 3] = c[0]; F.col[k * 3 + 1] = c[1]; F.col[k * 3 + 2] = c[2];
+      F.cell[k] = this.art?.sprites ? f.cell : 0;
+      F.size[k] = f.r * 2.4 * 420 * this.dpr;
+      F.alpha[k] = f.a;
+      k++;
+    }
+    const fg = this.firePoints.geometry;
+    fg.setDrawRange(0, k);
+    if (k) for (const a of ['position', 'color', 'size', 'alpha', 'cell']) fg.attributes[a].needsUpdate = true;
     const geo = this.points.geometry;
     geo.setDrawRange(0, n);
-    for (const k of ['position', 'color', 'size', 'alpha']) geo.attributes[k].needsUpdate = true;
+    for (const k of ['position', 'color', 'size', 'alpha', 'cell']) geo.attributes[k].needsUpdate = true;
   }
 
   // ------------------------------------------------------------- overlay

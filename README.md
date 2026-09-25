@@ -259,11 +259,17 @@ src/
   net.js            PeerJS transport, host + client
   clientstate.js    snapshot buffering, interpolation, prediction & reconciliation
   render.js         canvas 2D; every sprite drawn from primitives, zero assets
+  render3d.js       Three.js renderer: arena, models, floating weapons, effects
+  assets3d.js       loads assets/*.glb and bakes them into a few draw calls each
   ui.js             DOM panels, driven purely by control messages
   audio.js          procedural WebAudio sfx, zero asset files
   main.js           mode wiring, sim clock, render loop
+assets/             Blender output: characters, weapons, projectiles, enemies,
+                    arena (.glb), floor + bump map, particle sprite sheet
 tools/
   sim.mjs           headless balance harness (node)
+  blender/          one script per asset file; run inside Blender to rebuild
+  showcase.html     scripted scene through the real 3D renderer, for checking art
 ```
 
 Two deliberate choices worth flagging:
@@ -272,9 +278,20 @@ Two deliberate choices worth flagging:
   a snapshot to bytes and decoding it back before rendering. That costs a couple
   hundred microseconds a tick and buys a guarantee: a protocol bug cannot
   survive a solo playtest, and the host always sees what a remote client sees.
-- **No image, audio or font files at all.** Everything is drawn from canvas
-  primitives and synthesised with oscillators, so there is nothing to 404 and
-  nothing to wait on before the game starts.
+- **Art is optional.** The 2D renderer and all audio use no asset files at all.
+  The 3D renderer streams its Blender models in after the first frame and draws
+  procedural stand-ins until (or unless) they arrive, so a missing file never
+  blocks the game.
+
+### Rebuilding the 3D art
+
+Every file in `assets/` comes from a script in `tools/blender/` (`characters.py`,
+`weapons.py`, `projectiles.py`, `enemies.py`, `arena.py`, `fx_sprites.py`,
+sharing `common.py`). Open one in Blender's Text Editor and run it to rebuild
+that set in the scene; call its `export()` to write the file. The docstrings
+spell out the conventions the game relies on (scale, facing, part names).
+To look at the result without playing, serve the repo and open
+`/tools/showcase.html`: every potato, weapon, enemy and projectile in one scene.
 
 ## Licence
 

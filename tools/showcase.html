@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Art Showcase</title>
+<!-- Drives the real 3D renderer with a scripted scene so the Blender art
+     (tools/blender/*.py -> assets/) can be checked without playing a run.
+     Serve the repo root (e.g. `python3 -m http.server`) and open
+     /tools/showcase.html. Keys: 1-4 camera spots, 5-8 follow a potato, Z/X zoom, P pause. -->
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/" } }</script>
+<style>
+  html, body { margin: 0; height: 100%; background: #05060a; overflow: hidden; }
+  #wrap { position: relative; width: 100%; height: 100%; }
+  canvas#game { width: 100%; height: 100%; display: block; }
+  #hint { position: absolute; left: 12px; bottom: 10px; color: #aab; font: 12px system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas><div id="hint">1-4 camera · 5-8 follow · Z/X zoom · P pause</div></div>
+<script type="module">
+import { Renderer } from '../src/render3d.js';
+import { ARENA, CHARACTERS, ENEMIES, WEAPONS, WEAPON_IDS } from '../src/data.js';
+import { FX, PROJ_KINDS } from '../src/protocol.js';
+
+const r = new Renderer(document.getElementById('game'));
+window.showcase = r;
+let zoom = 0.62;
+r.setZoom(zoom);
+
+const cx = ARENA.w / 2, cy = ARENA.h / 2;
+const spots = [{ x: cx, y: cy }, { x: 300, y: 200 }, { x: cx, y: 170 }, { x: 1300, y: 700 }];
+let focus = spots[0];
+
+// eight potatoes in a loose ring, each carrying a different loadout
+const loadouts = [
+  ['pistol'], ['knife', 'sword'], ['smg', 'sniper', 'laser'], ['hammer', 'spear', 'scythe', 'shotgun'],
+  ['knife', 'shuriken'], ['shotgun', 'rocket', 'wand'], ['flamer', 'minigun', 'tesla', 'wand', 'rocket', 'smg'], ['sword', 'scythe'],
+];
+const players = CHARACTERS.map((ch, i) => ({
+  id: i + 1, char: ch.id, hp: 10, maxHp: 10, flags: 0,
+  x: cx + Math.cos(i / 8 * Math.PI * 2) * 220, y: cy + Math.sin(i / 8 * Math.PI * 2) * 130, ang: 0,
+  home: i / 8 * Math.PI * 2, cd: {},
+}));
+const builds = new Map(players.map((p, i) => [p.id, { weapons: loadouts[i].map((id) => ({ id, lvl: 1 + (i % 3) })) }]));
+const roster = new Map(players.map((p) => [p.id, { name: CHARACTERS[p.char].name }]));
+
+// every enemy type, circling the potatoes; bosses parked further out
+const enemies = [];
+let eid = 1;
+ENEMIES.forEach((def, type) => {
+  const n = def.boss ? 1 : 3;
+  for (let k = 0; k < n; k++) {
+    enemies.push({ id: eid++, type, x: 0, y: 0, ang: 0, hpPct: 200, flags: k === 2 ? 1 : 0,
+      orbit: def.boss ? 470 : 330 + type * 12, ph: type * 0.7 + k * 2.1, spd: def.boss ? 0.05 : 0.12 + k * 0.02 });
+  }
+});
+
+let projs = [], pid = 1, t = 0, last = performance.now(), paused = false;
+const kindOf = (id) => ({ shotgun: 1, laser: 2, sniper: 2, rocket: 3, flamer: 4, wand: 5, shuriken: 6 }[id] ?? 0);
+
+function step(dt) {
+  t += dt;
+  for (const p of players) {
+    const a = p.home + t * 0.25;
+    const nx = cx + Math.cos(a) * 220, ny = cy + Math.sin(a) * 130;
+    p.ang = Math.atan2(ny - p.y, nx - p.x);
+    p.x = nx; p.y = ny;
+  }
+  for (const e of enemies) {
+    const a = e.ph + t * e.spd;
+    const nx = cx + Math.cos(a) * e.orbit, ny = cy + Math.sin(a) * e.orbit * 0.62;
+    e.ang = Math.atan2(ny - e.y, nx - e.x);
+    e.x = nx; e.y = ny;
+    e.flags = (e.flags & 1) | (Math.sin(t * 3 + e.id) > 0.97 ? 2 : 0);
+  }
+  // each weapon fires at the nearest enemy on (roughly) its real cooldown
+  const fx = [];
+  for (const p of players) {
+    for (const w of builds.get(p.id).weapons) {
+      const def = WEAPONS[w.id];
+      p.cd[w.id] = (p.cd[w.id] ?? Math.random()) - dt;
+      if (p.cd[w.id] > 0) continue;
+      p.cd[w.id] = Math.max(def.cd, 0.07) * 1.3;
+      let best = null, bd = 1e9;
+      for (const e of enemies) { const d = Math.hypot(e.x - p.x, e.y - p.y); if (d < bd) { bd = d; best = e; } }
+      if (!best) continue;
+      const ang = Math.atan2(best.y - p.y, best.x - p.x);
+      if (def.cls === 'melee') {
+        projs.push({ id: pid++, type: 9, x: p.x, y: p.y, ang, flags: 0, size: def.range, life: 0.16, vx: 0, vy: 0, owner: p });
+      } else if (def.chain) {
+        fx.push({ t: FX.BEAM, x: p.x, y: p.y, x2: best.x, y2: best.y });
+      } else {
+        const n = def.count || 1;
+        for (let i = 0; i < n; i++) {
+          const a = ang + (n > 1 ? (i / (n - 1) - 0.5) * (def.spread || 0) * 2 : (Math.random() - 0.5) * (def.spread || 0));
+          projs.push({ id: pid++ & 65535, type: kindOf(w.id), x: p.x + Math.cos(a) * 18, y: p.y + Math.sin(a) * 18, ang: a,
+            flags: Math.random() < 0.15 ? 2 : 0, size: def.aoe ? 10 : (def.pierce >= 5 ? 4 : 6),
+            vx: Math.cos(a) * def.spd, vy: Math.sin(a) * def.spd, life: Math.min(0.9, def.life || def.range / def.spd) });
+        }
+      }
+    }
+  }
+  // enemy shots from the shooters and spitters
+  for (const e of enemies) {
+    if ((e.type === 3 || e.type === 6 || ENEMIES[e.type].boss) && Math.random() < dt * 0.6) {
+      const a = Math.atan2(cy - e.y, cx - e.x);
+      projs.push({ id: pid++ & 65535, type: e.type === 6 ? 8 : 7, x: e.x, y: e.y, ang: a, flags: 1, size: 7,
+        vx: Math.cos(a) * 180, vy: Math.sin(a) * 180, life: 1.6 });
+    }
+  }
+  for (const b of projs) {
+    b.life -= dt;
+    if (b.owner) { b.x = b.owner.x; b.y = b.owner.y; }
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    if (b.type === 3 && b.life <= 0) fx.push({ t: FX.EXPLODE, x: b.x, y: b.y, a: 115 });
+  }
+  projs = projs.filter((b) => b.life > 0);
+  if (Math.random() < dt * 1.5) {
+    const e = enemies[Math.floor(Math.random() * enemies.length)];
+    fx.push({ t: FX.DEATH, x: e.x, y: e.y, a: ENEMIES[e.type].r * 2, x2: e.type + 1 });
+    fx.push({ t: FX.HIT, x: e.x, y: e.y });
+  }
+  if (Math.random() < dt * 0.3) fx.push({ t: FX.LEVELUP, x: players[0].x, y: players[0].y });
+  r.spawnFx(fx);
+}
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (!paused) step(dt);
+  render(paused ? 0 : dt);
+  requestAnimationFrame(frame);
+}
+
+function render(dt) {
+  const view = {
+    phase: 1, wave: 7, timeLeft: 30,
+    players: players.map(({ id, char, x, y, ang, hp, maxHp, flags }) => ({ id, char, x, y, ang, hp, maxHp, flags })),
+    enemies: enemies.map(({ id, type, x, y, ang, hpPct, flags }) => ({ id, type, x, y, ang, hpPct, flags })),
+    projs: projs.map(({ id, type, x, y, ang, flags, size }) => ({ id, type, x, y, ang, flags, size })),
+    pickups: [],
+  };
+  r.draw(view, { pid: 1, roster, builds, followPos: focus, danger: 0 }, dt);
+}
+requestAnimationFrame(frame);
+// for scripted checks in a background tab (no rAF there): advance(seconds)
+window.advance = (sec, fps = 60) => { for (let i = 0; i < sec * fps; i++) { step(1 / fps); render(1 / fps); } };
+window.follow = (i) => { focus = players[i]; };
+window.scene = { players, builds, enemies };
+
+addEventListener('keydown', (e) => {
+  if (e.key >= '1' && e.key <= '4') focus = spots[+e.key - 1];
+  // 5 Pyro (flamer + minigun), 6 Bulwark (melee), 7 Gambler (shotgun + rocket), 8 Ranger (guns)
+  if (e.key >= '5' && e.key <= '8') focus = players[[6, 3, 5, 2][+e.key - 5]];
+  if (e.key === 'z') r.setZoom(zoom = Math.max(0.3, zoom * 0.85));
+  if (e.key === 'x') r.setZoom(zoom = Math.min(2, zoom / 0.85));
+  if (e.key === 'p') paused = !paused;
+});
+</script>
+</body>
+</html>

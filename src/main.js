@@ -849,7 +849,7 @@ class Game {
     if (this.mode === MODE.MENU) { this.renderer.draw(null, null, dt); return; }
 
     const view = this.state.sample(performance.now());
-    const info = { pid: this.myPid, roster: this.state.roster, danger: 0 };
+    const info = { pid: this.myPid, roster: this.state.roster, danger: 0, builds: this.builds, you: this.state.you };
     if (view) this.updateSpectate(view);
     if (this.spec.on) {
       info.watching = this.spec.free ? 0 : this.spec.target;
