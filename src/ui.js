@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import {
-  CHARACTERS, WEAPONS, ITEMS, STAT_LABEL, STAT_PCT, BASE_STATS,
+  CHARACTERS, WEAPONS, ITEMS, STAT_LABEL, STAT_PCT, BASE_STATS, regenPerSec,
   TIER_COLOR, TIER_NAME, MAX_WEAPONS, MAX_WEAPON_LVL, ROMAN, MAX_WAVE,
   CLASSES, SET_STEPS, DANGER, classCounts, setTier, waveDuration,
   weaponAt, weaponName, weaponDps,
@@ -92,7 +92,6 @@ function weaponBody(id, lvl, owned) {
 
 function fmtStat(k, v) {
   const sign = v > 0 ? '+' : '';
-  if (k === 'hpRegen') return `${sign}${v.toFixed(1)}/s`;
   if (STAT_PCT.has(k)) return `${sign}${Math.round(v)}%`;
   return `${sign}${Math.round(v)}`;
 }
@@ -647,7 +646,7 @@ export class UI {
       const d = el('div');
       d.title = STAT_LABEL[k];
       const cls = v > BASE_STATS[k] ? 'up' : v < BASE_STATS[k] ? 'down' : '';
-      const shown = k === 'hpRegen' ? `${v.toFixed(1)}/s`
+      const shown = k === 'hpRegen' ? `${Math.round(v)} <small>${regenPerSec(v).toFixed(2)}/s</small>`
         : STAT_PCT.has(k) ? `${Math.round(v)}%` : Math.round(v);
       d.innerHTML = `<canvas class="sicon" width="40" height="40" data-stat="${k}"></canvas><b class="${cls}">${shown}</b>`;
       box.appendChild(d);

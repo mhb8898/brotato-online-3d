@@ -905,6 +905,7 @@ export class Renderer {
 
     this.drawShadows(view);
     for (const p of view.pickups) this.drawPickup(p);
+    if (view.spawns) for (const e of view.spawns) drawSpawnMark(g, e.x, e.y, 1, this.t, e.flags & 1);
     for (const b of view.projs) if (b.flags & 1) this.drawProj(b);
     for (const e of view.enemies) this.drawEnemy(e);
     for (const p of view.players) this.drawPlayer(p, ctxInfo);
@@ -1456,3 +1457,22 @@ const PROJ_COLOR = {
 const TRAIL_LEN = { bullet: 22, pellet: 12, laser: 44, orb: 16, star: 14, enemy: 14, spit: 10 };
 
 export { TIER_COLOR };
+
+/**
+ * The warning cross where an enemy is about to appear. Shared with the 3D
+ * renderer's overlay so both display modes telegraph spawns identically.
+ */
+export function drawSpawnMark(g, x, y, k, t, elite) {
+  const pulse = 0.75 + Math.sin(t * 14) * 0.25;
+  const r = 11 * k;
+  g.save();
+  g.globalAlpha = pulse;
+  g.strokeStyle = elite ? '#ffc857' : '#ff4d5e';
+  g.lineWidth = 4 * k;
+  g.lineCap = 'round';
+  g.beginPath();
+  g.moveTo(x - r, y - r); g.lineTo(x + r, y + r);
+  g.moveTo(x + r, y - r); g.lineTo(x - r, y + r);
+  g.stroke();
+  g.restore();
+}

@@ -186,12 +186,17 @@ export class ClientState {
       }
     }
 
+    // Flag 8 is a telegraphed spawn: drawn as a warning marker, never as a
+    // body, so every enemy loop in the renderers can ignore it entirely.
+    const all = blend(older.enemies, newer.enemies, t, true);
+    const enemies = [], spawns = [];
+    for (const e of all) (e.flags & 8 ? spawns : enemies).push(e);
     return {
       phase: newer.phase,
       wave: newer.wave,
       timeLeft: lerp(older.timeLeft, newer.timeLeft, t),
       players,
-      enemies: blend(older.enemies, newer.enemies, t, true),
+      enemies, spawns,
       projs: blend(older.projs, newer.projs, t, true),
       pickups: blend(older.pickups, newer.pickups, t, false),
     };

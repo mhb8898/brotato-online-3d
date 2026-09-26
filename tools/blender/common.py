@@ -253,6 +253,10 @@ def join_children(parent, name, keep=lambda ob: False):
     "<name>_glow" instead (used to keep emissive parts separable by name).
     Transforms are baked relative to `parent`, and the originals are removed.
     """
+    # Parts made through the data API have stale world matrices until the view
+    # layer is evaluated. Without this every part was baked at its parent's
+    # origin and the whole arena collapsed into one lump the size of a brazier.
+    bpy.context.view_layer.update()
     groups = {False: [], True: []}
     for ob in parent.children_recursive:
         if ob.type == "MESH":

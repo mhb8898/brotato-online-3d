@@ -29,12 +29,19 @@ const DANGER = +(args.danger || 0);
 const ENDLESS_CAP = +(args.endless || 0);           // 0 = stop at the win
 const CHARS = args.char ? args.char.split(',').map(Number) : CHARACTERS.map((c) => c.id);
 const PID = 1;
-const TRACE = !!args.trace;   // per-wave line: hp, damage taken, kills, enemies left, build
+const TRACE = !!args.trace;
+// --bot idle: never move (the "park in the middle" test). A build that survives
+// this is one the game is not asking anything of.
+const BOT = args.bot || 'kite';
+// --idle-from N: play normally, then stop moving from wave N on. Answers "can a
+// finished build just stand there?", which the idle bot alone cannot, because
+// it never lives long enough to own a build.
+const IDLE_FROM = +(args['idle-from'] || 0);   // per-wave line: hp, damage taken, kills, enemies left, build
 
 // Level-up preference, most wanted first.
 const LEVEL_PREF = ['damage', 'maxHp', 'atkSpeed', 'armor', 'melee', 'ranged', 'elem', 'speed', 'crit', 'hpRegen', 'dodge', 'lifesteal', 'range', 'harvest', 'luck', 'pickup', 'critMult'];
 // How much one point of each stat is worth to the bot when comparing items.
-const ITEM_WEIGHT = { damage: 1.2, maxHp: 1.6, armor: 2.2, atkSpeed: 0.8, melee: 1.5, ranged: 1.5, elem: 1.5, hpRegen: 5, speed: 0.4, dodge: 0.8, crit: 0.5, lifesteal: 1.2, range: 0.2, harvest: 0.3, luck: 0.1, pickup: 0.05, critMult: 0.15 };
+const ITEM_WEIGHT = { damage: 1.2, maxHp: 1.6, armor: 2.2, atkSpeed: 0.8, melee: 1.5, ranged: 1.5, elem: 1.5, hpRegen: 1.2, speed: 0.4, dodge: 0.8, crit: 0.5, lifesteal: 1.2, range: 0.2, harvest: 0.3, luck: 0.1, pickup: 0.05, critMult: 0.15 };
 
 function itemScore(o, p) {
   let s = 0;
@@ -51,7 +58,7 @@ function weaponScore(o, p) {
 }
 
 export function shopUntilBroke(world, p) {
-  for (let guard = 0; guard < 12; guard++) {
+  for (let guard = 0; guard < 24; guard++) {
     if (!p.shop) return;
     let best = null, bestScore = 0;
     p.shop.offers.forEach((o, i) => {
@@ -64,7 +71,14 @@ export function shopUntilBroke(world, p) {
       } else s = itemScore(o, p);
       if (s > bestScore) { bestScore = s; best = i; }
     });
-    if (best === null) return;
+    if (best === null) {
+      // Nothing worth it on the shelf: reroll while that leaves money to buy
+      // with, which is what any player does with a pile of materials.
+      const cost = world.rerollCost(p);
+      if (p.mats < cost + 20 || guard > 8) return;
+      world.reroll(p);
+      continue;
+    }
     world.buy(p, best);
   }
 }
@@ -144,7 +158,7 @@ export function runOnce(charId) {
   while (ticks++ < stats.maxTicks) {
     if (world.phase === PHASE.WAVE) {
       shopped = false;
-      world.setInput(PID, botInput(world, p, ++seq));
+      world.setInput(PID, (BOT === 'idle' || (IDLE_FROM && world.wave >= IDLE_FROM)) ? { seq: ++seq, mx: 0, my: 0, aim: 0 } : botInput(world, p, ++seq));
       if (p.levelOptions) {
         let pick = 0;
         for (const key of LEVEL_PREF) { const i = p.levelOptions.findIndex((o) => o.key === key); if (i >= 0) { pick = i; break; } }
@@ -194,10 +208,18 @@ for (const id of CHARS) {
     'mats/wave': Math.round(mats.reduce((a, b) => a + b, 0) / Math.max(1, mats.length)),
     'min/run': mins.toFixed(1),
     'lvl': median(res.map((r) => r.level)),
+    // The early game mostly measures the bot's dodging; this is the build
+    // game: of the runs that got to wave 10, how many finished.
+    'won/reached 10': `${res.filter((r) => r.win).length}/${res.filter((r) => r.wave >= 9).length}`,
+    ...(IDLE_FROM ? { 'idle survived': (() => {
+      // Of the runs that got a build to the idle wave, how many then won by standing still.
+      const reached = res.filter((r) => r.wave >= IDLE_FROM - 1);
+      return reached.length ? `${reached.filter((r) => r.win).length}/${reached.length}` : '-';
+    })() } : {}),
   });
   process.stderr.write(`${CHARACTERS[id].name} done\n`);
 }
-console.log(`danger ${DANGER}, ${RUNS} runs each${ENDLESS_CAP ? `, endless to ${ENDLESS_CAP}` : ''}, ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+console.log(`${BOT} bot${IDLE_FROM ? ` (idle from wave ${IDLE_FROM})` : ''}, danger ${DANGER}, ${RUNS} runs each${ENDLESS_CAP ? `, endless to ${ENDLESS_CAP}` : ''}, ${((Date.now() - t0) / 1000).toFixed(0)}s`);
 console.table(rows);
 const all = rows.map((r) => r['median wave']);
 console.log(`overall median wave ${median(all)}, spread ${Math.min(...all)}..${Math.max(...all)}`);

@@ -31,7 +31,7 @@ export const DANGER = [
 // Every stat a player can have. Percent-based unless noted.
 export const BASE_STATS = {
   maxHp: 12,      // flat
-  hpRegen: 0,     // hp per second
+  hpRegen: 0,     // points: 1 = 0.2 HP/s, +0.089 HP/s per extra point (Brotato)
   lifesteal: 0,   // % of damage dealt healed (chance-based)
   armor: 0,       // flat, feeds a diminishing-returns curve
   dodge: 0,       // % chance to ignore a hit, capped
@@ -48,6 +48,16 @@ export const BASE_STATS = {
   harvest: 0,     // % extra materials
   pickup: 0,      // % pickup radius
 };
+
+/**
+ * HP Regeneration is in points, like Brotato: the first point heals 0.2 HP/s
+ * and every further point adds 0.089, so 10 points is 1 HP/s. It used to be
+ * raw HP/s, which made one uncommon bandage worth a Brotato build's whole
+ * regen investment.
+ */
+export function regenPerSec(points) {
+  return points <= 0 ? 0 : 0.2 + 0.089 * (points - 1);
+}
 
 export const STAT_LABEL = {
   maxHp: 'Max HP', hpRegen: 'HP Regen', lifesteal: 'Lifesteal', armor: 'Armor',
@@ -88,7 +98,7 @@ export const CHARACTERS = [
     mods: { elem: 8, atkSpeed: 15, maxHp: -2, armor: -2 } },
   { id: 7, name: 'Leech',     color: '#9be7d8', weapon: 'sword',
     desc: 'Heals off everything it hits, hits softly.',
-    mods: { lifesteal: 12, maxHp: -4, damage: -10, hpRegen: 1 } },
+    mods: { lifesteal: 12, maxHp: -4, damage: -10, hpRegen: 3 } },
 ];
 
 // --------------------------------------------------------------------------
@@ -104,7 +114,7 @@ export const WEAPONS = {
   sword:    { desc: 'A wider, heavier swing than the knife. Solid all-round melee.', name: 'Sword',        cls: 'melee',  tier: 2, price: 26, dmg: 13, cd: 0.85, range: 145, arc: 2.1, scale: { m: 1.2, r: 0, e: 0 }, color: '#b8c6d9' },
   spear:    { desc: 'Long narrow thrust. Reaches past contact range, hits one target.', name: 'Spear',        cls: 'melee',  tier: 2, price: 24, dmg: 15, cd: 0.7,  range: 210, arc: 0.55, scale: { m: 1.1, r: 0, e: 0 }, color: '#cbb88f' },
   hammer:   { desc: 'Slow, huge arc, knocks everything back. Melee crowd control.', name: 'Hammer',       cls: 'melee',  tier: 2, price: 28, dmg: 24, cd: 1.35, range: 135, arc: 2.6, knock: 420, scale: { m: 1.5, r: 0, e: 0 }, color: '#a08b6b' },
-  scythe:   { desc: 'Sweeps almost a full circle and heals you on every hit.', name: 'Scythe',       cls: 'melee',  tier: 3, price: 46, dmg: 17, cd: 0.75, range: 175, arc: 3.4, scale: { m: 1.3, r: 0, e: 0.3 }, lifesteal: 8, color: '#a6f0c6' },
+  scythe:   { desc: 'Sweeps almost a full circle. Each swing has a 12% chance to heal 1.', name: 'Scythe',       cls: 'melee',  tier: 3, price: 46, dmg: 17, cd: 0.75, range: 175, arc: 3.4, scale: { m: 1.3, r: 0, e: 0.3 }, lifesteal: 12, color: '#a6f0c6' },
   pistol:   { desc: 'One accurate shot at a time. Steady damage at long range.', name: 'Pistol',       cls: 'ranged', tier: 1, price: 12, dmg: 8,  cd: 0.5,  range: 500, spd: 760, scale: { m: 0, r: 1.0, e: 0 }, color: '#ffe9a8' },
   smg:      { desc: 'Sprays fast and wide. Tiny per shot, enormous in volume.', name: 'SMG',          cls: 'ranged', tier: 1, price: 16, dmg: 4,  cd: 0.15, range: 420, spd: 800, spread: 0.13, scale: { m: 0, r: 0.5, e: 0 }, color: '#ffd166' },
   shotgun:  { desc: 'Six pellets in a cone. Brutal up close, wasted at distance.', name: 'Shotgun',      cls: 'ranged', tier: 2, price: 30, dmg: 5,  cd: 0.9,  range: 340, spd: 680, count: 6, spread: 0.42, scale: { m: 0, r: 0.6, e: 0 }, color: '#ffb37a' },
@@ -224,49 +234,68 @@ export function weaponDps(def) {
 // --------------------------------------------------------------------------
 // Items (passive stat sticks bought in the shop)
 // --------------------------------------------------------------------------
+// Brotato's rule, adopted here: almost every stat item costs you something.
+// A pure upside is a checkbox, not a choice, and a shop full of checkboxes is
+// how a build ends up good at everything. The few with no downside are small.
 export const ITEMS = [
-  { id: 'boots',     name: 'Running Shoes',   tier: 1, price: 14, mods: { speed: 8 } },
-  { id: 'vest',      name: 'Padded Vest',     tier: 1, price: 15, mods: { armor: 2, speed: -2 } },
-  { id: 'meal',      name: 'Hot Meal',        tier: 1, price: 13, mods: { maxHp: 4 } },
-  { id: 'glove',     name: 'Weighted Glove',  tier: 1, price: 14, mods: { melee: 2 } },
-  { id: 'scope',     name: 'Cheap Scope',     tier: 1, price: 14, mods: { ranged: 2 } },
-  { id: 'ember',     name: 'Ember',           tier: 1, price: 14, mods: { elem: 2 } },
+  { id: 'boots',     name: 'Running Shoes',   tier: 1, price: 14, mods: { speed: 6, range: -5 } },
+  { id: 'vest',      name: 'Padded Vest',     tier: 1, price: 15, mods: { armor: 1, speed: -2 } },
+  { id: 'meal',      name: 'Hot Meal',        tier: 1, price: 13, mods: { maxHp: 4, damage: -1 } },
+  { id: 'glove',     name: 'Weighted Glove',  tier: 1, price: 14, mods: { melee: 2, atkSpeed: -3 } },
+  { id: 'scope',     name: 'Cheap Scope',     tier: 1, price: 14, mods: { ranged: 2, range: -5 } },
+  { id: 'ember',     name: 'Ember',           tier: 1, price: 14, mods: { elem: 2, dodge: -2 } },
   { id: 'magnet',    name: 'Magnet',          tier: 1, price: 12, mods: { pickup: 30 } },
-  { id: 'coffee',    name: 'Cold Brew',       tier: 1, price: 16, mods: { atkSpeed: 7, maxHp: -1 } },
-  { id: 'charm',     name: 'Lucky Charm',     tier: 1, price: 15, mods: { luck: 15 } },
-  { id: 'sickle',    name: 'Sickle',          tier: 1, price: 15, mods: { harvest: 18 } },
+  { id: 'coffee',    name: 'Cold Brew',       tier: 1, price: 16, mods: { atkSpeed: 8, damage: -2 } },
+  { id: 'charm',     name: 'Lucky Charm',     tier: 1, price: 15, mods: { luck: 15, maxHp: -1 } },
+  { id: 'sickle',    name: 'Sickle',          tier: 1, price: 15, mods: { harvest: 15, damage: -1 } },
+  { id: 'mushroom',  name: 'Mushroom',        tier: 1, price: 16, mods: { hpRegen: 3, luck: -5 } },
+  { id: 'bat',       name: 'Bat',             tier: 1, price: 18, mods: { lifesteal: 3, harvest: -3 } },
+  { id: 'injection', name: 'Injection',       tier: 1, price: 18, mods: { damage: 7, maxHp: -2 } },
+  { id: 'glasses',   name: 'Glasses',         tier: 1, price: 17, mods: { range: 18 } },
 
-  { id: 'plate',     name: 'Steel Plate',     tier: 2, price: 30, mods: { armor: 4, maxHp: 4, speed: -4 } },
-  { id: 'scarf',     name: 'Silk Scarf',      tier: 2, price: 28, mods: { dodge: 6, speed: 5 } },
-  { id: 'whetstone', name: 'Whetstone',       tier: 2, price: 30, mods: { melee: 4, damage: 3 } },
-  { id: 'laserdot',  name: 'Laser Dot',       tier: 2, price: 30, mods: { ranged: 4, crit: 3 } },
-  { id: 'core',      name: 'Reactor Core',    tier: 2, price: 32, mods: { elem: 4, atkSpeed: 4 } },
-  { id: 'bandage',   name: 'Field Bandage',   tier: 2, price: 28, mods: { hpRegen: 1.2 } },
-  { id: 'fang',      name: 'Vampire Fang',    tier: 2, price: 32, mods: { lifesteal: 6, maxHp: -2 } },
-  { id: 'barrel',    name: 'Long Barrel',     tier: 2, price: 29, mods: { range: 18 } },
-  { id: 'dice',      name: 'Loaded Dice',     tier: 2, price: 31, mods: { crit: 7, luck: 12 } },
+  { id: 'plate',     name: 'Steel Plate',     tier: 2, price: 30, mods: { armor: 3, damage: -3 } },
+  { id: 'scarf',     name: 'Silk Scarf',      tier: 2, price: 28, mods: { dodge: 6, maxHp: -2 } },
+  { id: 'whetstone', name: 'Whetstone',       tier: 2, price: 30, mods: { melee: 4, damage: 2, range: -5 } },
+  { id: 'laserdot',  name: 'Laser Dot',       tier: 2, price: 30, mods: { ranged: 3, crit: 4, atkSpeed: -3 } },
+  { id: 'core',      name: 'Reactor Core',    tier: 2, price: 32, mods: { elem: 4, atkSpeed: 4, maxHp: -2 } },
+  { id: 'bandage',   name: 'Field Bandage',   tier: 2, price: 28, mods: { hpRegen: 4, speed: -2 } },
+  { id: 'fang',      name: 'Vampire Fang',    tier: 2, price: 32, mods: { lifesteal: 5, maxHp: -2 } },
+  { id: 'barrel',    name: 'Long Barrel',     tier: 2, price: 29, mods: { range: 20, atkSpeed: -3 } },
+  { id: 'dice',      name: 'Loaded Dice',     tier: 2, price: 31, mods: { crit: 6, luck: 10, damage: -2 } },
   { id: 'battery',   name: 'Overclock Cell',  tier: 2, price: 33, mods: { atkSpeed: 12, armor: -2 } },
+  { id: 'cyclops',   name: 'Cyclops Eye',     tier: 2, price: 34, mods: { damage: 12, range: -12 } },
+  { id: 'leather',   name: 'Leather Vest',    tier: 2, price: 34, mods: { armor: 2, dodge: 5, maxHp: -3 } },
+  { id: 'muscle',    name: 'Muscle Tee',      tier: 2, price: 36, mods: { melee: 3, maxHp: 5, range: -15 } },
 
-  { id: 'engine',    name: 'Turbo Engine',    tier: 3, price: 54, mods: { speed: 18, dodge: 5, maxHp: -4 } },
-  { id: 'aegis',     name: 'Aegis',           tier: 3, price: 58, mods: { armor: 8, maxHp: 10, speed: -8 } },
-  { id: 'gauntlet',  name: 'War Gauntlet',    tier: 3, price: 58, mods: { melee: 8, damage: 8, ranged: -4 } },
-  { id: 'railkit',   name: 'Rail Kit',        tier: 3, price: 58, mods: { ranged: 8, range: 15, atkSpeed: -5 } },
-  { id: 'prism',     name: 'Storm Prism',     tier: 3, price: 60, mods: { elem: 8, crit: 5 } },
-  { id: 'heart',     name: 'Second Heart',    tier: 3, price: 56, mods: { maxHp: 14, hpRegen: 1.5, speed: -5 } },
+  { id: 'engine',    name: 'Turbo Engine',    tier: 3, price: 54, mods: { speed: 15, dodge: 5, maxHp: -5 } },
+  { id: 'aegis',     name: 'Aegis',           tier: 3, price: 58, mods: { armor: 6, maxHp: 8, speed: -8 } },
+  { id: 'gauntlet',  name: 'War Gauntlet',    tier: 3, price: 58, mods: { melee: 8, damage: 6, ranged: -4, range: -10 } },
+  { id: 'railkit',   name: 'Rail Kit',        tier: 3, price: 58, mods: { ranged: 6, range: 20, atkSpeed: -6 } },
+  { id: 'prism',     name: 'Storm Prism',     tier: 3, price: 60, mods: { elem: 7, crit: 5, maxHp: -3 } },
+  { id: 'heart',     name: 'Second Heart',    tier: 3, price: 56, mods: { maxHp: 12, hpRegen: 3, speed: -5 } },
+  { id: 'glass',     name: 'Glass Cannon',    tier: 3, price: 62, mods: { damage: 25, armor: -3 } },
+  { id: 'statue',    name: 'Statue',          tier: 3, price: 60, mods: { atkSpeed: 35, speed: -12 } },
 
-  { id: 'crown',     name: 'Bloody Crown',    tier: 4, price: 92, mods: { damage: 20, lifesteal: 8, maxHp: -8, armor: -4 } },
-  { id: 'nucleus',   name: 'Nucleus',         tier: 4, price: 95, mods: { melee: 6, ranged: 6, elem: 6, atkSpeed: 8 } },
-  { id: 'phantom',   name: 'Phantom Cloak',   tier: 4, price: 90, mods: { dodge: 16, speed: 12, maxHp: -6 } },
-  { id: 'jackpot',   name: 'Jackpot',         tier: 4, price: 94, mods: { crit: 18, critMult: 60, luck: 40 } },
+  { id: 'crown',     name: 'Bloody Crown',    tier: 4, price: 92, mods: { damage: 20, lifesteal: 6, maxHp: -8, armor: -4 } },
+  { id: 'nucleus',   name: 'Nucleus',         tier: 4, price: 95, mods: { melee: 5, ranged: 5, elem: 5, atkSpeed: 8, dodge: -6 } },
+  { id: 'phantom',   name: 'Phantom Cloak',   tier: 4, price: 90, mods: { dodge: 15, speed: 12, maxHp: -6 } },
+  { id: 'jackpot',   name: 'Jackpot',         tier: 4, price: 94, mods: { crit: 15, critMult: 50, luck: 30, armor: -2 } },
+  { id: 'potato',    name: 'Golden Potato',   tier: 4, price: 98,
+    mods: { maxHp: 4, hpRegen: 2, lifesteal: 1, damage: 5, atkSpeed: 5, speed: 3, dodge: 3, armor: 1, luck: 5 } },
 
-  // ---- effect items: one mechanic each, one copy per player. These are the
-  // build-defining pieces; the stat sticks above are what you buy around them.
+  // ---- effect items: one mechanic each. `unique` ones are one per player.
+  // These are the build-defining pieces; the stat sticks above are what you
+  // buy around them. Several are deliberately double-edged.
   { id: 'cactus',      name: 'Thorns',       tier: 1, price: 16, unique: true, effect: 'thorns',      v: 8,
     desc: 'Enemies that touch you take 8 damage.' },
   { id: 'adrenaline',  name: 'Adrenaline',   tier: 1, price: 15, unique: true, effect: 'adrenaline',  v: 35,
     desc: '+35% speed for 2s after you take a hit.' },
   { id: 'medkit',      name: 'Field Kit',    tier: 1, price: 14, unique: true, effect: 'medkit',      v: 5,
     desc: 'Health drops are 3x as common and heal 5.' },
+  { id: 'scar',        name: 'Scar',         tier: 1, price: 18, unique: true, effect: 'xp',          v: 25, mods: { range: -8 },
+    desc: '+25% experience.' },
+  { id: 'coupon',      name: 'Coupon',       tier: 1, price: 15, effect: 'coupon', v: 5,
+    desc: 'Shop prices -5%. Stacks up to -25%.' },
   { id: 'piggy',       name: 'Piggy Bank',   tier: 2, price: 30, unique: true, effect: 'interest',    v: 20,
     desc: 'End of wave: +20% of your unspent materials (max 40).' },
   { id: 'frag',        name: 'Volatile',     tier: 2, price: 34, unique: true, effect: 'frag',        v: 40,
@@ -277,10 +306,24 @@ export const ITEMS = [
     desc: '+60% damage to enemies below 30% HP.' },
   { id: 'momentum',    name: 'Momentum',     tier: 2, price: 30, unique: true, effect: 'momentum',    v: 30,
     desc: '+1% damage per kill this wave, up to +30%. Resets each wave.' },
-  { id: 'ricochet',    name: 'Ricochet',     tier: 3, price: 55, unique: true, effect: 'ricochet',    v: 1,
+  { id: 'bait',        name: 'Bait',         tier: 2, price: 26, effect: 'crowd', v: 15, mods: { damage: 8 },
+    desc: '15% more enemies spawn (more materials, more danger).' },
+  { id: 'silver',      name: 'Silver Bullet', tier: 2, price: 36, unique: true, effect: 'bigGame',    v: 30,
+    desc: '+30% damage to bosses and elites.' },
+  { id: 'ricochet',    name: 'Ricochet',     tier: 3, price: 55, unique: true, effect: 'ricochet',    v: 1, mods: { damage: -10 },
     desc: 'Bullets that would stop bounce to a nearby enemy once.' },
   { id: 'alchemy',     name: 'Alchemy',      tier: 3, price: 56, unique: true, effect: 'alchemy',     v: 12,
     desc: 'Every 12 materials you collect heal 1 HP.' },
+  { id: 'tardigrade',  name: 'Tardigrade',   tier: 3, price: 52, unique: true, effect: 'shield',      v: 1,
+    desc: 'The first hit you take each wave does nothing.' },
+  { id: 'tomato',      name: 'Sad Tomato',   tier: 3, price: 48, unique: true, effect: 'halfstart',   v: 50, mods: { hpRegen: 8 },
+    desc: 'Every wave starts at half health.' },
+  { id: 'pact',        name: 'Blood Pact',   tier: 3, price: 50, unique: true, effect: 'drain',       v: 1, mods: { harvest: 35 },
+    desc: 'Lose 1 HP per second during waves (never below 1).' },
+  { id: 'trophy',      name: 'Hunting Trophy', tier: 3, price: 55, unique: true, effect: 'trophy',    v: 33,
+    desc: 'Critical kills have a 33% chance to drop an extra material.' },
+  { id: 'ghost',       name: 'Ghost Cloak',  tier: 3, price: 70, unique: true, effect: 'dodgecap',    v: 10, mods: { dodge: 8, armor: -3 },
+    desc: 'Your dodge cap rises from 60% to 70%.' },
 ];
 
 export const ITEM_BY_ID = Object.fromEntries(ITEMS.map((i) => [i.id, i]));
@@ -325,8 +368,8 @@ export const UPGRADES = [
   { key: 'crit',      tier: 0, mods: { crit: 4 } },
   { key: 'crit',      tier: 1, mods: { crit: 8 } },
   { key: 'critMult',  tier: 1, mods: { critMult: 25 } },
-  { key: 'hpRegen',   tier: 0, mods: { hpRegen: 0.8 } },
-  { key: 'hpRegen',   tier: 1, mods: { hpRegen: 1.6 } },
+  { key: 'hpRegen',   tier: 0, mods: { hpRegen: 2 } },
+  { key: 'hpRegen',   tier: 1, mods: { hpRegen: 4 } },
   { key: 'lifesteal', tier: 1, mods: { lifesteal: 5 } },
   { key: 'range',     tier: 0, mods: { range: 10 } },
   { key: 'range',     tier: 1, mods: { range: 20 } },

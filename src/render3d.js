@@ -25,6 +25,7 @@ import * as THREE from 'three';
 import { ARENA, CHARACTERS, ENEMIES, WEAPONS, TIER_COLOR } from './data.js';
 import { FX, PROJ_KINDS } from './protocol.js';
 import { loadAssets } from './assets3d.js';
+import { drawSpawnMark } from './render.js';
 
 const TAU = Math.PI * 2;
 const PLAYER_R = 14;
@@ -108,6 +109,7 @@ function fireRgb(age, out) {
   return out;
 }
 const FIRE_TMP = [0, 0, 0];
+const MUZZLE_EASE = 0.1;   // seconds for a shot to slide from the gun onto the host's line
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
 /**
@@ -307,7 +309,8 @@ export class Renderer {
     this.wst = new Map();          // pid -> floating weapon slots
     this.prevProj = new Set();     // projectile ids seen last frame, to spot new shots
     this.curProj = new Set();
-    this.shotKeys = new Set();     // owner+kind already credited with a shot this frame
+    this.shotKeys = new Map();     // owner+kind -> the gun slot credited with this frame's shot
+    this.projOff = new Map();      // projectile id -> {x, y, h, t}: muzzle offset, eased out after firing
     this.swingSlots = new Map();   // live swing projectile id -> the melee slot swinging it
     this.projBorn = new Map();     // projectile id -> render time first seen (flames age visibly)
     this.firePts = [];             // this frame's flame sprites (drawn by firePoints)
@@ -715,15 +718,9 @@ export class Renderer {
       bowl.position.set(b.x, WALL_H + 36, b.z);
       this.scene.add(bowl);
       this.procArena.push(p, bowl);
-      const flame = new THREE.Mesh(GEO.loSphere, this.glowMat('#ffb060'));
-      flame.scale.set(9, 13, 9);
-      flame.position.set(b.x, WALL_H + 48, b.z);
-      this.scene.add(flame);
-      const core = new THREE.Mesh(GEO.loSphere, this.glowMat('#fff3d0'));
-      core.scale.set(4.5, 6.5, 4.5);
-      core.position.copy(flame.position);
-      this.scene.add(core);
-      b.flame = flame; b.core = core;
+      // The fire itself is sprites (see updateBraziers). A solid glowing
+      // sphere here read as a potato sitting in the bowl.
+      b.fireH = WALL_H + 42;
     }
   }
 
@@ -1260,11 +1257,11 @@ export class Renderer {
 
     this.lastView = view;
     this.updateCamera(view, info, dt);
-    this.updateBraziers();
 
     this.syncPlayers(view, info);
     this.syncEnemies(view);
     this.syncProjectiles(view);
+    this.updateBraziers();   // after syncProjectiles: it resets the fire sprite list
     this.syncWeapons(view, info);
     this.syncPickups(view);
     this.syncShapes();
@@ -1325,12 +1322,28 @@ export class Renderer {
     this.camera.lookAt(this.camTarget.x + sx, 0, this.camTarget.z + sz);
   }
 
+  /**
+   * Corner fires: the flamethrower's sprites, looping in place. Each tongue
+   * rises out of the bowl and cools from white-hot to red as it goes, and the
+   * tongues are staggered so the fire never pulses as one blob.
+   */
   updateBraziers() {
+    const TONGUES = 6;
     for (const b of this.braziers) {
       const f = 0.85 + Math.sin(this.t * 9 + b.ph) * 0.08 + Math.sin(this.t * 23 + b.ph * 3) * 0.07;
       b.light.intensity = 26000 * f;
-      b.flame.scale.set(9 * f, 13 * (0.9 + f * 0.3), 9 * f);
-      b.core.scale.set(4.5, 6.5 * f, 4.5);
+      const h0 = b.fireH;
+      this.firePt(b.x, b.z, h0 + 6, 30 * f, 0.1, 0, 0.55);                     // glow over the coals
+      for (let i = 0; i < TONGUES; i++) {
+        const age = (this.t * 1.5 + i / TONGUES + b.ph) % 1;
+        const sway = Math.sin(this.t * 5 + i * 2.1 + b.ph) * 4 * age;
+        const a = i * 1.7 + b.ph;
+        this.firePt(
+          b.x + Math.cos(a) * 4 * (1 - age) + sway, b.z + Math.sin(a) * 4 * (1 - age),
+          h0 + 4 + age * 44, 20 * (1 - age * 0.5) * f, age * 0.8, i & 1, Math.pow(1 - age, 0.5),
+        );
+      }
+      if (Math.random() < 0.05) this.burst(b.x, b.z, h0 + 20, 1, '#ffb347', 30, 0.9, 1.5, 'spark');
     }
   }
 
@@ -1529,8 +1542,8 @@ export class Renderer {
     if (!owner) return;
     // a shotgun volley is six projectiles in one frame but one trigger pull
     const key = owner.id * 16 + PROJ_KINDS.indexOf(kind);
-    if (this.shotKeys.has(key)) return;
-    this.shotKeys.add(key);
+    if (this.shotKeys.has(key)) { this.fromMuzzle(b, this.shotKeys.get(key)); return; }
+    this.shotKeys.set(key, null);
     const st = this.wst.get(owner.id);
     if (!st) return;
     let pick = null;
@@ -1547,7 +1560,20 @@ export class Renderer {
       return;
     }
     pick.kick = 1; pick.ang = b.ang; pick.spinV = 30;
+    this.shotKeys.set(key, pick);
+    this.fromMuzzle(b, pick);
     this.muzzleFlash(pick, b.ang);
+  }
+
+  /**
+   * The simulation fires from the player's centre (it knows nothing about
+   * where the floating guns are drawn), so a new shot is drawn starting at
+   * the gun that fired it and eased onto its true path over MUZZLE_EASE.
+   * Purely visual: hits are still decided on the host's line.
+   */
+  fromMuzzle(b, sl) {
+    if (!sl || sl.mx === undefined) return;
+    this.projOff.set(b.id, { x: sl.mx - b.x, y: sl.my - b.y, h: sl.mh, t: this.t });
   }
 
   /** Chain lightning has no projectile, so its first link stands in for the shot. */
@@ -1651,11 +1677,16 @@ export class Renderer {
     this.firePts.length = 0;
     const first = this.prevProj.size === 0 && !this.projPrimed;
     this.projPrimed = true;
-    for (const b of view.projs) {
-      const kind = PROJ_KINDS[b.type] || 'bullet';
-      seen.add(b.id);
-      if (!this.prevProj.has(b.id)) this.projBorn.set(b.id, this.t);
-      if (!first && !this.prevProj.has(b.id) && !(b.flags & 1)) this.onShot(view, b, kind);
+    for (const b0 of view.projs) {
+      const kind = PROJ_KINDS[b0.type] || 'bullet';
+      seen.add(b0.id);
+      if (!this.prevProj.has(b0.id)) this.projBorn.set(b0.id, this.t);
+      if (!first && !this.prevProj.has(b0.id) && !(b0.flags & 1)) this.onShot(view, b0, kind);
+      // Freshly fired: draw it offset toward the muzzle, closing to zero.
+      const off = this.projOff.get(b0.id);
+      const ease = off ? Math.max(0, 1 - (this.t - off.t) / MUZZLE_EASE) : 0;
+      if (off && !ease) this.projOff.delete(b0.id);
+      const b = ease ? { ...b0, x: b0.x + off.x * ease, y: b0.y + off.y * ease } : b0;
       if (kind === 'swing') {
         const sl = this.swingSlots.get(b.id);
         if (sl) { sl.swingNow = b.ang; sl.swing = Math.max(sl.swing, 0.35); }
@@ -1708,6 +1739,7 @@ export class Renderer {
         case 'spit': sx = sr * 1.8; sy = sz = sr * 1.2; break;
         default: break;
       }
+      if (ease) h += (off.h - h) * ease;
       q.setFromAxisAngle(yAxis, kind === 'star' ? this.t * 10 : -b.ang);
       pos.set(b.x, h, b.y);
       const model = art?.[kind];
@@ -1735,6 +1767,7 @@ export class Renderer {
     }
     for (const id of this.swingSlots.keys()) if (!seen.has(id)) this.swingSlots.delete(id);
     for (const id of this.projBorn.keys()) if (!seen.has(id)) this.projBorn.delete(id);
+    for (const id of this.projOff.keys()) if (!seen.has(id)) this.projOff.delete(id);
     [this.prevProj, this.curProj] = [this.curProj, this.prevProj];
     if (art) {
       for (const k in art) {
@@ -1874,6 +1907,12 @@ export class Renderer {
     g.clearRect(0, 0, this.w, this.h);
     g.textAlign = 'center';
     g.textBaseline = 'alphabetic';
+
+    // ---- spawn warnings, on the ground where the enemy will stand
+    if (view.spawns) for (const e of view.spawns) {
+      const s = this.project(e.x, 0, e.y);
+      if (s) drawSpawnMark(g, s.x, s.y, this.labelScale(s.d), this.t, e.flags & 1);
+    }
 
     // ---- enemy bars and labels
     for (const e of view.enemies) {

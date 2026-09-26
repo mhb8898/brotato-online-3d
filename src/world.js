@@ -13,7 +13,7 @@ import {
   ARENA, BASE_STATS, CHARACTERS, WEAPONS, WEAPON_IDS, ITEMS, ITEM_BY_ID, UPGRADES,
   ENEMIES, MAX_WAVE, HARD_WAVE_CAP, MAX_WEAPONS, MAX_WEAPON_LVL, DANGER,
   bossForWave, bossCountForWave, waveDuration, setBonusMods, effectMap,
-  weaponAt, weaponName,
+  weaponAt, weaponName, regenPerSec,
 } from './data.js';
 import { FX, PROJ_KINDS } from './protocol.js';
 
@@ -24,7 +24,16 @@ const TAU = Math.PI * 2;
 const BASE_SPEED = 235;
 const PLAYER_R = 14;
 const PICKUP_BASE = 46;
-const IFRAME = 0.55;
+// Brotato's window: 0.2s for a scratch, up to 0.4s for a hit worth a fifth of
+// your health. The old flat 0.55s capped intake at under two hits a second no
+// matter how many enemies were touching you, which is what made parking in a
+// crowd survivable.
+const IFRAME_MIN = 0.2, IFRAME_MAX = 0.4;
+// Enemies appear anywhere on the field, telegraphed, never on top of a player.
+// Edge-only spawns made the middle of the arena the one place nothing reached.
+const SPAWN_WARN = 1.0;
+const SPAWN_SAFE = 230;
+const LIFESTEAL_CD = 0.1;   // at most 10 HP/s from lifesteal, as in Brotato
 const SHOP_TIMEOUT = 150;
 const INPUT_Q_TARGET = 1;   // spare frames of input the host will sit on
 const MAX_INPUT_Q = 4;      // hard cap, so a stalled client cannot bank movement
@@ -87,6 +96,7 @@ export class World {
     this.timeLeft = 0;
     this.players = new Map();
     this.enemies = [];
+    this.incoming = [];     // telegraphed spawns: visible, not yet in the fight
     this.projs = [];
     this.pickups = [];
     this.fx = [];
@@ -110,7 +120,7 @@ export class World {
     const p = {
       id, name: name || `Player ${id}`, char: 0,
       x: ARENA.w / 2 + (this.players.size - 1) * 60, y: ARENA.h / 2,
-      ang: 0, hp: 10, alive: true, hurtT: 0, iframe: 0, regenAcc: 0,
+      ang: 0, hp: 10, alive: true, hurtT: 0, iframe: 0, regenAcc: 0, lsCd: 0,
       stats: { ...BASE_STATS }, fx: {},
       weapons: [], items: [], upgrades: [],
       mats: 0, level: 1, xp: 0, xpNeed: xpFor(1),
@@ -121,6 +131,7 @@ export class World {
       // Per-wave counters (summary line + Momentum) and effect-item state.
       waveKills: 0, waveMats: 0, waveDmg: 0,
       frenzy: 0, frenzyT: 0, adrenT: 0, alchAcc: 0,
+      xpAcc: 0, shieldN: 0, drainAcc: 0,
     };
     this.players.set(id, p);
     this.recomputeStats(p);
@@ -382,7 +393,7 @@ export class World {
     this.result = null;
     // Whoever never came back is not in the next run.
     for (const p of [...this.players.values()]) if (!p.connected) this.players.delete(p.id);
-    this.enemies.length = 0; this.projs.length = 0; this.pickups.length = 0;
+    this.enemies.length = 0; this.incoming.length = 0; this.projs.length = 0; this.pickups.length = 0;
     for (const p of this.players.values()) {
       p.ready = false;
       p.shop = null;
@@ -400,7 +411,7 @@ export class World {
     this.phase = PHASE.WAVE;
     this.timeLeft = waveDuration(this.wave);
     this.spawnAcc = 0;
-    this.enemies.length = 0; this.projs.length = 0; this.pickups.length = 0;
+    this.enemies.length = 0; this.incoming.length = 0; this.projs.length = 0; this.pickups.length = 0;
     this.blasts.length = 0;
     this.bossSpawned = false;
 
@@ -410,7 +421,8 @@ export class World {
       p.alive = p.connected;   // a dropped player sits out until they are back
       // Every wave starts at full health, so a wave is a self-contained test
       // and chip damage from three waves ago cannot decide this one.
-      p.hp = p.stats.maxHp;
+      p.hp = p.fx.halfstart ? Math.ceil(p.stats.maxHp * (1 - p.fx.halfstart / 100)) : p.stats.maxHp;
+      p.shieldN = p.fx.shield || 0;
       p.iframe = 1.2;
       p.waveKills = 0; p.waveMats = 0; p.waveDmg = 0;
       p.frenzy = 0; p.frenzyT = 0; p.adrenT = 0;
@@ -440,6 +452,7 @@ export class World {
     }
     this.pickups.length = 0;
     this.enemies.length = 0;
+    this.incoming.length = 0;
     this.projs.length = 0;
     this.blasts.length = 0;
 
@@ -509,7 +522,7 @@ export class World {
     s.harvest += DANGER[this.danger].harvest;
     p.fx = effectMap(p.items);
     s.maxHp = Math.max(1, s.maxHp);
-    s.dodge = clamp(s.dodge, 0, 60);
+    s.dodge = clamp(s.dodge, 0, 60 + (p.fx.dodgecap || 0));
     s.crit = clamp(s.crit, 0, 100);
     s.speed = Math.max(-70, s.speed);
     p.stats = s;
@@ -551,7 +564,7 @@ export class World {
       id,
       name: def.name,
       tier: def.tier - 1,
-      price: Math.ceil(def.price * priceScale(this.wave)),
+      price: Math.ceil(def.price * priceScale(this.wave) * (1 - Math.min(25, p.fx.coupon || 0) / 100)),
       mods: wantWeapon ? null : (def.mods || null),
       desc: wantWeapon ? null : (def.desc || null),
       sold: false,
@@ -770,6 +783,7 @@ export class World {
     if (this.phase === PHASE.WAVE) {
       this.timeLeft -= TICK;
       this.stepSpawning();
+      this.stepIncoming();
       this.stepPlayers();
       this.stepEnemies();
       this.stepProjectiles();
@@ -797,17 +811,21 @@ export class World {
       for (let i = 0; i < n; i++) this.spawnEnemy(bossForWave(this.wave), false);
     }
     // Front-load spawns a little so the wave has bite immediately.
-    const cap = Math.round((26 + Math.min(this.wave, 30) * 3.2) * (0.65 + 0.35 * np));
-    if (this.enemies.length >= cap) { this.spawnAcc = Math.min(this.spawnAcc, 1); return; }
+    // Bait: every copy anyone carries thickens the wave for the whole squad.
+    let crowd = 0;
+    for (const p of this.players.values()) if (p.alive) crowd += p.fx.crowd || 0;
+    const cap = Math.round((26 + Math.min(this.wave, 30) * 3.2) * (0.65 + 0.35 * np) * (1 + crowd / 200));
+    const alive = () => this.enemies.length + this.incoming.length;
+    if (alive() >= cap) { this.spawnAcc = Math.min(this.spawnAcc, 1); return; }
 
     // Gentle for the first few waves (starter weapons kill about one enemy a
     // second), bending upward so the late game is dense. Waves 1-5 see roughly
     // 15, 22, 32, 45, 60 spawns.
     const wv = this.wave;
-    const rate = Math.min(6.5, 0.5 + wv * 0.22 + wv * wv * 0.006) * dg.spawn * (0.6 + 0.4 * np)
+    const rate = (1 + crowd / 100) * Math.min(6.5, 0.5 + wv * 0.22 + wv * wv * 0.006) * dg.spawn * (0.6 + 0.4 * np)
       * (this.isBossWave(this.wave) ? 0.45 : 1);
     this.spawnAcc += rate * TICK;
-    while (this.spawnAcc >= 1 && this.enemies.length < cap) {
+    while (this.spawnAcc >= 1 && alive() < cap) {
       this.spawnAcc -= 1;
       const type = this.pickEnemyType();
       const def = ENEMIES[type];
@@ -816,7 +834,12 @@ export class World {
       // swarmers unlock on drop four times the materials of the one before.
       if (count > 1) this.spawnAcc -= (count - 1) * 0.5;
       const elite = !def.boss && this.rng() < Math.min(0.22, this.wave * 0.012) + dg.elite;
-      for (let i = 0; i < count; i++) this.spawnEnemy(type, elite);
+      // A pack lands together, so it reads as one threat rather than six.
+      const at = this.spawnPoint();
+      for (let i = 0; i < count; i++) {
+        const a = (i / count) * TAU;
+        this.spawnEnemy(type, elite, count > 1 ? { x: at.x + Math.cos(a) * 34, y: at.y + Math.sin(a) * 34 } : at);
+      }
     }
   }
 
@@ -841,15 +864,40 @@ export class World {
     return 0;
   }
 
-  spawnEnemy(type, elite) {
+  /**
+   * A random point on the field at least SPAWN_SAFE from every live player.
+   * Standing anywhere, the middle included, means things appear around you.
+   */
+  spawnPoint() {
+    const m = 40;
+    let best = null, bestD = -1;
+    for (let tries = 0; tries < 14; tries++) {
+      const x = m + this.rng() * (ARENA.w - 2 * m);
+      const y = m + this.rng() * (ARENA.h - 2 * m);
+      let d = Infinity;
+      for (const p of this.players.values()) if (p.alive) d = Math.min(d, Math.hypot(p.x - x, p.y - y));
+      if (d >= SPAWN_SAFE) return { x, y };
+      if (d > bestD) { bestD = d; best = { x, y }; }
+    }
+    return best;
+  }
+
+  /** Telegraphed spawns that have waited long enough join the fight. */
+  stepIncoming() {
+    if (!this.incoming.length) return;
+    let keep = 0;
+    for (const e of this.incoming) {
+      e.spawnT -= TICK;
+      if (e.spawnT <= 0) this.enemies.push(e);
+      else this.incoming[keep++] = e;
+    }
+    this.incoming.length = keep;
+  }
+
+  /** @param at optional {x, y}; omitted means a fresh telegraphed spawn point */
+  spawnEnemy(type, elite, at) {
     const def = ENEMIES[type];
-    const m = 30;
-    let x, y;
-    const side = (this.rng() * 4) | 0;
-    if (side === 0) { x = this.rng() * ARENA.w; y = m; }
-    else if (side === 1) { x = this.rng() * ARENA.w; y = ARENA.h - m; }
-    else if (side === 2) { x = m; y = this.rng() * ARENA.h; }
-    else { x = ARENA.w - m; y = this.rng() * ARENA.h; }
+    const { x, y } = at || this.spawnPoint();
 
     const np = Math.max(1, this.players.size);
     // Bosses already start with a huge pool; scaling them on the same curve as
@@ -865,8 +913,8 @@ export class World {
     const hpScale = waveScale * (1 + 0.28 * (np - 1)) * (elite ? 3.2 : 1);
     const dmgScale = (1 + w * 0.07 + w * w * 0.002) * Math.pow(1.05, over) * dg.dmg * (elite ? 1.5 : 1);
 
-    this.enemies.push({
-      id: this.nextId++ & 65535, type, x, y, ang: 0,
+    this.incoming.push({
+      id: this.nextId++ & 65535, type, x, y, ang: 0, spawnT: SPAWN_WARN,
       hp: def.hp * hpScale, maxHp: def.hp * hpScale,
       spd: def.spd * (elite ? 0.88 : 1) * (1 + (this.rng() - 0.5) * 0.12),
       dmg: def.dmg * dmgScale,
@@ -898,8 +946,9 @@ export class World {
       if (p.iframe > 0) p.iframe -= TICK;
       if (p.hurtT > 0) p.hurtT -= TICK;
 
+      if (p.lsCd > 0) p.lsCd -= TICK;
       if (st.hpRegen > 0 && p.hp < st.maxHp) {
-        p.regenAcc += st.hpRegen * TICK;
+        p.regenAcc += regenPerSec(st.hpRegen) * TICK;
         if (p.regenAcc >= 1) {
           const n = Math.floor(p.regenAcc);
           p.regenAcc -= n;
@@ -907,7 +956,14 @@ export class World {
         }
       }
 
-      if (this.phase === PHASE.WAVE) this.stepWeapons(p);
+      if (this.phase === PHASE.WAVE) {
+        // Blood Pact: a steady bleed that never finishes the job by itself.
+        if (p.fx.drain) {
+          p.drainAcc += p.fx.drain * TICK;
+          if (p.drainAcc >= 1) { p.drainAcc -= 1; if (p.hp > 1) p.hp -= 1; }
+        }
+        this.stepWeapons(p);
+      }
     }
   }
 
@@ -925,6 +981,15 @@ export class World {
       const target = this.nearestEnemy(p.x, p.y, range);
       if (!target) continue;
       w.cd = def.cd * asMul;
+      // Lifesteal rolls once per attack, as in Brotato. Rolling per enemy hit
+      // multiplied it by pellets, pierce and swing width, and made a shotgun
+      // or a scythe in a crowd heal faster than anything could hurt you.
+      const ls = st.lifesteal + (def.lifesteal || 0);
+      if (ls > 0 && p.lsCd <= 0 && p.hp < st.maxHp && this.rng() * 100 < ls) {
+        p.lsCd = LIFESTEAL_CD;
+        p.hp = Math.min(st.maxHp, p.hp + 1);
+        this.fx.push({ t: FX.HEAL, x: p.x, y: p.y, a: 0 });
+      }
       const ang = Math.atan2(target.y - p.y, target.x - p.x);
       this.fireWeapon(p, w.id, def, ang, range, w.lvl);
     }
@@ -950,7 +1015,7 @@ export class World {
         id: this.nextId++ & 65535, kind: 'swing', owner: p.id,
         x: p.x, y: p.y, ang, life: 0.16, maxLife: 0.16,
         range, arc: def.arc, weapon: id, wlvl: lvl || 1, hit: new Set(),
-        knock: def.knock || 0, lifesteal: def.lifesteal || 0,
+        knock: def.knock || 0,
       });
       return;
     }
@@ -974,7 +1039,7 @@ export class World {
         pierce: def.pierce || 0, aoe: def.aoe || 0,
         bounce: def.aoe ? 0 : (p.fx.ricochet || 0),
         homing: def.homing || 0, r: def.aoe ? 8 : 6,
-        lifesteal: def.lifesteal || 0, hit: new Set(),
+        hit: new Set(),
         size: def.aoe ? 10 : (def.pierce >= 5 ? 4 : 6),
       });
     }
@@ -1069,7 +1134,13 @@ export class World {
               for (let s = 0; s < def.ringN; s++) {
                 this.spawnEnemyShot(e, (s / def.ringN) * TAU, def.shotSpd, e.dmg * 0.5);
               }
-              if (def.summon) for (let s = 0; s < 4; s++) this.spawnEnemy(1, false);
+              if (def.summon) for (let s = 0; s < 4; s++) {
+                const a = this.rng() * TAU;
+                this.spawnEnemy(1, false, {
+                  x: clamp(e.x + Math.cos(a) * (e.r + 40), 20, ARENA.w - 20),
+                  y: clamp(e.y + Math.sin(a) * (e.r + 40), 20, ARENA.h - 20),
+                });
+              }
             }
             break;
           }
@@ -1195,7 +1266,7 @@ export class World {
           b.hit.add(e.id);
           const { dmg, crit } = this.weaponDamage(owner, def);
           this.damageEnemy(e, dmg, crit, owner, b.knock ? Math.cos(b.ang) * b.knock : 0,
-            b.knock ? Math.sin(b.ang) * b.knock : 0, b.lifesteal);
+            b.knock ? Math.sin(b.ang) * b.knock : 0);
         }
         continue;
       }
@@ -1244,7 +1315,7 @@ export class World {
         b.hit.add(e.id);
         if (b.aoe) { this.detonate(b); this.projs.splice(i, 1); break; }
         const sp = Math.hypot(b.vx, b.vy) || 1;
-        this.damageEnemy(e, b.dmg, b.crit, owner, (b.vx / sp) * 80, (b.vy / sp) * 80, b.lifesteal);
+        this.damageEnemy(e, b.dmg, b.crit, owner, (b.vx / sp) * 80, (b.vy / sp) * 80);
         this.fx.push({ t: FX.HIT, x: b.x, y: b.y, a: 0 });
         if (b.pierce > 0) { b.pierce--; b.dmg *= 0.88; continue; }
         // Ricochet: a bullet that would die here turns toward a fresh target.
@@ -1271,15 +1342,16 @@ export class World {
     for (const e of near) {
       if (e.dead) continue;
       if (Math.hypot(e.x - b.x, e.y - b.y) > b.aoe + e.r) continue;
-      this.damageEnemy(e, b.dmg, b.crit, owner, 0, 0, b.lifesteal);
+      this.damageEnemy(e, b.dmg, b.crit, owner, 0, 0);
     }
   }
 
   // -------------------------------------------------------------- damage
-  damageEnemy(e, dmg, crit, owner, kx, ky, lifesteal) {
+  damageEnemy(e, dmg, crit, owner, kx, ky) {
     if (e.dead) return;
     // Executioner: finish what is already bleeding.
     if (owner && owner.fx.execute && e.hp < e.maxHp * 0.3) dmg *= 1 + owner.fx.execute / 100;
+    if (owner && owner.fx.bigGame && (e.boss || e.elite)) dmg *= 1 + owner.fx.bigGame / 100;
     e.hp -= dmg;
     e.hitT = 0.12;
     if (kx || ky) {
@@ -1288,14 +1360,6 @@ export class World {
       e.y += ky * TICK * m * 3;
     }
     this.fx.push({ t: FX.DAMAGE, x: e.x, y: e.y - e.r, x2: crit ? 1 : 0, a: Math.min(255, Math.round(dmg)) });
-
-    if (owner) {
-      const ls = (owner.stats.lifesteal || 0) + (lifesteal || 0);
-      if (ls > 0 && owner.alive && owner.hp < owner.stats.maxHp && this.rng() * 100 < ls) {
-        owner.hp = Math.min(owner.stats.maxHp, owner.hp + 1);
-        this.fx.push({ t: FX.HEAL, x: owner.x, y: owner.y, a: 0 });
-      }
-    }
 
     if (e.hp <= 0) {
       // Flag now, compact once at the end of the tick. A wave-20 minigun kills
@@ -1322,7 +1386,13 @@ export class World {
         });
       }
       const harvest = owner ? owner.stats.harvest : 0;
-      let n = e.mats;
+      // Late waves hold several times the enemies of early ones, and every
+      // material is also XP, so a flat drop rate made wave 19 pay for two
+      // legendaries and three levels. Each kill is worth a little less as the
+      // run goes on; probabilistic rounding keeps the average exact.
+      const mv = e.mats * matScale(this.wave);
+      let n = Math.floor(mv) + (this.rng() < mv % 1 ? 1 : 0);
+      if (crit && owner && owner.fx.trophy && this.rng() * 100 < owner.fx.trophy) n++;
       const bonus = harvest / 100;
       n += Math.floor(bonus) + (this.rng() < bonus % 1 ? 1 : 0);
       const drops = Math.min(n, 4);
@@ -1337,7 +1407,8 @@ export class World {
         });
       }
       const kit = owner ? owner.fx.medkit : 0;
-      const healChance = (0.035 + (owner ? owner.stats.luck / 2500 : 0)) * (kit ? 3 : 1);
+      // Thinned with the wave like materials: a late wave kills hundreds.
+      const healChance = (0.03 + (owner ? owner.stats.luck / 2500 : 0)) * (kit ? 3 : 1) * matScale(this.wave);
       if (this.rng() < healChance) {
         this.pickups.push({
           id: this.nextId++ & 65535, type: 1, x: e.x, y: e.y,
@@ -1356,6 +1427,13 @@ export class World {
       p.iframe = 0.12;
       return true;
     }
+    if (p.shieldN > 0) {
+      // Tardigrade: the hit happens, it just does not count.
+      p.shieldN--;
+      this.fx.push({ t: FX.DODGE, x: p.x, y: p.y, a: 0 });
+      p.iframe = IFRAME_MAX;
+      return true;
+    }
     const reduce = st.armor >= 0
       ? st.armor / (st.armor + 22)
       : st.armor / 22;                       // negative armor amplifies
@@ -1363,7 +1441,7 @@ export class World {
     p.hp -= dmg;
     p.waveDmg += dmg;
     p.hurtT = 0.25;
-    p.iframe = IFRAME;
+    p.iframe = IFRAME_MIN + (IFRAME_MAX - IFRAME_MIN) * Math.min(1, dmg / (st.maxHp * 0.2));
     if (p.fx.adrenaline) p.adrenT = 2;
     this.fx.push({ t: FX.DAMAGE, x: p.x, y: p.y - 22, x2: 0, a: Math.min(255, dmg) });
     if (p.hp <= 0) {
@@ -1408,7 +1486,12 @@ export class World {
     if (pk.type === 0) {
       p.mats += pk.value;
       p.waveMats += pk.value;
-      this.grantXp(p, pk.value);
+      if (p.fx.xp) {
+        p.xpAcc += pk.value * (1 + p.fx.xp / 100);
+        const n = Math.floor(p.xpAcc);
+        p.xpAcc -= n;
+        this.grantXp(p, n);
+      } else this.grantXp(p, pk.value);
       this.fx.push({ t: FX.PICKUP, x: p.x, y: p.y, a: 0 });
       if (p.fx.alchemy) {
         p.alchAcc += pk.value;
@@ -1504,11 +1587,15 @@ export class World {
         flags: (p.alive ? 0 : 1) | (p.hurtT > 0 ? 2 : 0) | (p.iframe > 0 ? 4 : 0),
       });
     }
-    const enemies = this.enemies.map((e) => ({
+    const enemies = this.incoming.map((e) => ({
+      id: e.id, type: e.type, x: Math.round(e.x), y: Math.round(e.y), ang: 0, hpPct: 255,
+      flags: 8 | (e.elite ? 1 : 0),
+    }));
+    for (const e of this.enemies) enemies.push({
       id: e.id, type: e.type, x: Math.round(e.x), y: Math.round(e.y), ang: e.ang,
       hpPct: Math.max(0, Math.min(255, Math.round((e.hp / e.maxHp) * 255))),
       flags: (e.elite ? 1 : 0) | (e.hitT > 0 ? 2 : 0) | (e.state === 1 ? 4 : 0),
-    }));
+    });
     const projs = this.projs.map((b) => ({
       id: b.id, type: kindIdx(b.kind), x: Math.round(b.x), y: Math.round(b.y),
       ang: b.kind === 'swing' ? b.ang + b.arc * ((1 - b.life / b.maxLife) - 0.5) : b.ang,
@@ -1532,10 +1619,20 @@ function xpFor(level) {
   return Math.floor(2 + level * 2.2 + Math.pow(level, 1.75));
 }
 
+/** Materials per kill: full value on wave 1, about 60% by wave 20. */
+function matScale(wave) {
+  return 1 / (1 + 0.035 * (wave - 1));
+}
+
 // Late waves drop several hundred materials each. Prices have to bend the
 // same way or the shop stops being a choice and becomes a checkout.
+//
+// The first few shops get a discount that fades out by wave 6: wave 1 pays
+// about a dozen materials, and a first shop you cannot buy anything from
+// teaches you to skip the shop.
 function priceScale(wave) {
-  return 1 + wave * 0.07 + wave * wave * 0.007;
+  const early = 1 - 0.45 * Math.max(0, 6 - wave) / 5;
+  return (1 + wave * 0.07 + wave * wave * 0.007) * early;
 }
 
 function projKindFor(id) {

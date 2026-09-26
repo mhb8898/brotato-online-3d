@@ -489,6 +489,10 @@ const ITEM_GLYPH = {
   // effect items
   cactus: 'stone', adrenaline: 'cup', medkit: 'cross', piggy: 'seven', frag: 'flame',
   frenzy: 'battery', executioner: 'fang', momentum: 'gear', ricochet: 'crosshair', alchemy: 'atom',
+  mushroom: 'clover', bat: 'fang', injection: 'cross', glasses: 'crosshair', cyclops: 'crosshair',
+  leather: 'shield', muscle: 'fist', glass: 'prism', statue: 'stone', potato: 'crown',
+  scar: 'fang', coupon: 'seven', bait: 'magnet', silver: 'bolt', tardigrade: 'shield',
+  tomato: 'heart', pact: 'fang', trophy: 'star', ghost: 'ghost',
 };
 
 // -------------------------------------------------------------- icons
