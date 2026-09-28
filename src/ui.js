@@ -543,7 +543,7 @@ export class UI {
     // Rebuilding the offer grid every frame would kill click targets mid-press,
     // so only redraw when something actually changed.
     const key = JSON.stringify([shop.offers.map((o) => o && [o.id, o.sold]), shop.locked,
-      you.mats, you.weapons.map((w) => `${w.id}${w.lvl}`), you.items.length]);
+      you.mats, you.weapons.map((w) => `${w.id}${w.lvl}`), you.items.length, you.stats]);
     if (key === this.lastShopKey) return;
     this.lastShopKey = key;
 
@@ -681,18 +681,28 @@ export class UI {
     });
   }
 
+  /**
+   * Stat sheet. Whatever moved since the last draw flashes with its delta, so
+   * a purchase, sale or level-up visibly changes the numbers it touched.
+   */
   renderStats(you) {
     const box = $('statList');
+    const prev = this._prevStats;
+    this._prevStats = { ...you.stats };
     box.innerHTML = '';
     for (const k of Object.keys(BASE_STATS)) {
       const v = you.stats[k];
-      if (v === BASE_STATS[k] && v === 0) continue;   // hide untouched zero stats
-      const d = el('div');
+      const delta = prev ? Math.round(v - (prev[k] ?? v)) : 0;
+      if (v === BASE_STATS[k] && v === 0 && !delta) continue;   // hide untouched zero stats
+      const d = el('div', delta ? `changed ${delta > 0 ? 'gain' : 'loss'}` : '');
       d.title = STAT_LABEL[k];
       const cls = v > BASE_STATS[k] ? 'up' : v < BASE_STATS[k] ? 'down' : '';
+      const pct = STAT_PCT.has(k) ? '%' : '';
       const shown = k === 'hpRegen' ? `${Math.round(v)} <small>${regenPerSec(v).toFixed(2)}/s</small>`
-        : STAT_PCT.has(k) ? `${Math.round(v)}%` : Math.round(v);
-      d.innerHTML = `<canvas class="sicon" width="40" height="40" data-stat="${k}"></canvas><b class="${cls}">${shown}</b>`;
+        : `${Math.round(v)}${pct}`;
+      d.innerHTML = `<canvas class="sicon" width="40" height="40" data-stat="${k}"></canvas>` +
+        (delta ? `<i class="delta">${delta > 0 ? '+' : ''}${delta}${pct}</i>` : '') +
+        `<b class="${cls}">${shown}</b>`;
       box.appendChild(d);
     }
     paintStatIcons(box);

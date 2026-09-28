@@ -674,6 +674,18 @@ kbd {
 
 .stat-list div { justify-content: flex-start; align-items: center; }
 .stat-list div b { margin-left: auto; }
+.stat-list div.changed { animation: stat-flash 1.6s ease-out; }
+.stat-list div.gain b { color: var(--good); }
+.stat-list div.loss b { color: var(--bad); }
+.stat-list .delta {
+  margin-left: auto; font-style: normal; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums;
+  animation: stat-delta 1.6s ease-out forwards;
+}
+.stat-list .delta + b { margin-left: 6px; }
+.stat-list div.gain .delta { color: var(--good); }
+.stat-list div.loss .delta { color: var(--bad); }
+@keyframes stat-flash { from { background: rgba(255,200,87,.18); } to { background: transparent; } }
+@keyframes stat-delta { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
 
 .lu-opt { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 14px 8px; min-width: 104px; }
 .lu-opt .sicon { width: 30px; height: 30px; }

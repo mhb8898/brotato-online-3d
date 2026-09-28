@@ -533,6 +533,7 @@ class Game {
       case 'shopopen':
         this.ui.screen('shop');
         this.ui.lastShopKey = '';
+        this.ui._prevStats = null;   // a fresh shop: last wave's level-ups are not news
         this.ui.setShopSummary(msg.wave, msg.summary);
         sfx.shop();
         break;
