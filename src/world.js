@@ -11,7 +11,7 @@
 
 import {
   ARENA, BASE_STATS, CHARACTERS, WEAPONS, WEAPON_IDS, ITEMS, ITEM_BY_ID, UPGRADES,
-  ENEMIES, MAX_WAVE, HARD_WAVE_CAP, MAX_WEAPONS, MAX_WEAPON_LVL, DANGER,
+  ENEMIES, MAX_WAVE, HARD_WAVE_CAP, MAX_WEAPONS, MAX_WEAPON_LVL, DANGER, TRADE_TAX, UPGRADE_TIER_LEVEL,
   bossForWave, bossCountForWave, waveDuration, setBonusMods, effectMap,
   weaponAt, weaponName, regenPerSec,
 } from './data.js';
@@ -91,6 +91,7 @@ export class World {
     this.phase = PHASE.LOBBY;
     this.wave = 0;
     this.danger = 0;
+    this.trade = false;     // host option: teammates may send materials in the shop
     this.endless = false;   // set once the squad continues past MAX_WAVE
     this.blasts = [];       // Volatile explosions queued this tick, resolved once
     this.timeLeft = 0;
@@ -200,6 +201,7 @@ export class World {
       t: 'lobby',
       phase: this.phase,
       danger: this.danger,
+      trade: this.trade,
       host: this.hostId,
       players: [...this.players.values()].map((p) => ({
         id: p.id, name: p.name, char: p.char, ready: p.ready, connected: p.connected,
@@ -295,6 +297,13 @@ export class World {
           this.pushLobby();
         }
         break;
+      case 'trade':
+        if (pid === this.hostId && this.phase === PHASE.LOBBY) {
+          this.trade = !!msg.v;
+          this.pushLobby();
+        }
+        break;
+      case 'give': this.give(p, msg.to | 0, msg.amt | 0); break;
       case 'kick':
         // Moderation is the host's alone, and the host cannot kick themselves.
         if (pid === this.hostId) this.kick(msg.id | 0);
@@ -677,6 +686,26 @@ export class World {
     this.pushYou(p);
   }
 
+  /**
+   * Hand materials to a teammate, minus TRADE_TAX. Shop only, so nothing
+   * changes hands mid-fight, and never to someone who left: their slot keeps
+   * its build but a gift would just vanish into it.
+   */
+  give(p, to, amt) {
+    if (!this.trade || this.phase !== PHASE.SHOP) return;
+    const q = this.players.get(to);
+    if (!q || q === p || !q.connected) return;
+    amt = Math.min(amt, p.mats);
+    const got = Math.floor(amt * (1 - TRADE_TAX));
+    if (got < 1) return;
+    p.mats -= amt;
+    q.mats += got;
+    this.pushYou(p);
+    this.pushYou(q);
+    this.send(p.id, { t: 'toast', kind: 'good', msg: `Sent ${got} materials to ${q.name} (${amt - got} tax)` });
+    this.send(q.id, { t: 'toast', kind: 'good', msg: `${p.name} sent you ${got} materials` });
+  }
+
   /** Half price, doubled per level, since each level swallowed two weapons. */
   sellValue(w) {
     return Math.floor(WEAPONS[w.id].price * 0.5 * Math.pow(2, (w.lvl || 1) - 1));
@@ -729,7 +758,7 @@ export class World {
   }
 
   offerUpgrades(p) {
-    const maxTier = p.level < 5 ? 1 : p.level < 12 ? 2 : 3;
+    const maxTier = 1 + UPGRADE_TIER_LEVEL.filter(([, lvl]) => p.level >= lvl).length;
     const pool = UPGRADES.filter((u) => u.tier < maxTier);
     const picked = [];
     const seen = new Set();

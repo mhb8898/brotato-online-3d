@@ -21,6 +21,11 @@ export function bossCountForWave(w) {
 
 // Danger is picked by the host in the lobby. Harder is also richer: the
 // harvest bonus keeps the shop moving when enemies take longer to die.
+// Share of every material transfer between teammates that is burned. Pooling a
+// squad's income into one carry is strong; the tax keeps it a rescue, not the
+// default play.
+export const TRADE_TAX = 0.15;
+
 export const DANGER = [
   { name: 'Danger 0', hp: 1,   dmg: 1,    spawn: 1,    elite: 0,    harvest: 0,  desc: 'The standard run.' },
   { name: 'Danger 1', hp: 1.3, dmg: 1.15, spawn: 1.12, elite: 0.04, harvest: 10, desc: 'Tougher enemies, a few more elites.' },
@@ -66,6 +71,30 @@ export const STAT_LABEL = {
   crit: 'Crit Chance', critMult: 'Crit Damage', range: 'Range', luck: 'Luck',
   harvest: 'Harvesting', pickup: 'Pickup Range',
 };
+
+// One line on what each stat actually does, for level-up choices.
+export const STAT_DESC = {
+  maxHp: 'More health, and heals you by the same amount',
+  hpRegen: 'Heal a little every second',
+  lifesteal: 'Chance to heal 1 HP on hit',
+  armor: 'Take less damage from every hit',
+  dodge: 'Chance to ignore a hit entirely',
+  speed: 'Move faster',
+  damage: 'All weapons hit harder',
+  melee: 'Flat bonus for melee weapons',
+  ranged: 'Flat bonus for ranged weapons',
+  elem: 'Flat bonus for elemental weapons',
+  atkSpeed: 'All weapons fire faster',
+  crit: 'More hits land as critical',
+  critMult: 'Critical hits deal more',
+  range: 'Weapons reach further',
+  luck: 'Rarer shop offers and more drops',
+  harvest: 'Extra materials from every pickup',
+  pickup: 'Collect materials from further away',
+};
+
+// Level-up upgrades unlock by tier as you level: [tier, from level].
+export const UPGRADE_TIER_LEVEL = [[1, 5], [2, 12]];
 
 // Which stats read as percentages in the UI.
 export const STAT_PCT = new Set(['lifesteal', 'dodge', 'speed', 'damage',

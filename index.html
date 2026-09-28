@@ -129,6 +129,14 @@
             <div id="dangerOpts" class="danger-opts"></div>
             <p id="dangerDesc" class="sub"></p>
           </div>
+          <div id="tradeBox" class="danger-box hidden">
+            <span class="lbl">MATERIAL SHARING</span>
+            <div id="tradeOpts" class="danger-opts">
+              <button class="dopt" data-v="0">Off</button>
+              <button class="dopt" data-v="1">On</button>
+            </div>
+            <p id="tradeDesc" class="sub"></p>
+          </div>
           <button id="btnReady" class="btn primary wide">Ready</button>
           <button id="btnForceStart" class="btn wide hidden">Start now</button>
           <button id="btnLeave" class="btn ghost wide">Leave</button>
@@ -160,6 +168,15 @@
         <button id="btnShopForce" class="btn hidden">Start wave now</button>
       </div>
 
+      <div id="giveBox" class="give-box hidden">
+        <span class="lbl">SEND MATERIALS</span>
+        <select id="giveTo" aria-label="Teammate"></select>
+        <input id="giveAmt" type="number" min="1" step="1" value="10" aria-label="Amount">
+        <button id="giveAll" class="btn tiny">All</button>
+        <button id="btnGive" class="btn">Send</button>
+        <small id="giveNote"></small>
+      </div>
+
       <div class="shop-lower">
         <div class="panel">
           <h3>Weapons <small id="wslots"></small></h3>
@@ -181,6 +198,7 @@
   <!-- ==================== Level-up (non-blocking) ==================== -->
   <div id="levelup" class="levelup hidden">
     <div class="levelup-head">Level <b id="luLevel">2</b> &mdash; choose an upgrade <span id="luPending"></span></div>
+    <div id="luHint" class="lu-hint"></div>
     <div id="luOptions" class="lu-options"></div>
   </div>
 

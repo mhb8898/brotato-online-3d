@@ -7,7 +7,7 @@
 import {
   CHARACTERS, WEAPONS, ITEMS, STAT_LABEL, STAT_PCT, BASE_STATS, regenPerSec,
   TIER_COLOR, TIER_NAME, MAX_WEAPONS, MAX_WEAPON_LVL, ROMAN, MAX_WAVE,
-  CLASSES, SET_STEPS, DANGER, classCounts, setTier, waveDuration,
+  CLASSES, SET_STEPS, DANGER, TRADE_TAX, STAT_DESC, UPGRADE_TIER_LEVEL, classCounts, setTier, waveDuration,
   weaponAt, weaponName, weaponDps,
 } from './data.js';
 import { renderPortrait } from './render.js';
@@ -134,6 +134,14 @@ export class UI {
     $('btnNetTest').onclick = () => c.onNetTest();
     $('btnForceStart').onclick = () => c.onForceStart();
     $('btnShopForce').onclick = () => c.onForceStart();
+
+    for (const b of $('tradeOpts').children) b.onclick = () => c.onTrade(b.dataset.v === '1');
+    $('giveAmt').oninput = () => { this.lastGiveKey = ''; };
+    $('giveAll').onclick = () => { $('giveAmt').value = this._giveMats || 0; this.lastGiveKey = ''; };
+    $('btnGive').onclick = () => {
+      const amt = Math.floor(+$('giveAmt').value);
+      if ($('giveTo').value && amt > 0) c.onGive(+$('giveTo').value, amt);
+    };
 
     // ---- spectator bar
     // Delegated, because the team rows are rebuilt from a string whenever a
@@ -356,6 +364,18 @@ export class UI {
     }
     $('dangerDesc').textContent = `${DANGER[danger].name}: ${DANGER[danger].desc}`
       + (editable ? '' : ' (host picks)');
+  }
+
+  /** Host-only lobby switch; hidden in a solo run, where there is nobody to share with. */
+  renderTrade(on, editable, players) {
+    $('tradeBox').classList.toggle('hidden', players < 2);
+    for (const b of $('tradeOpts').children) {
+      b.classList.toggle('on', (b.dataset.v === '1') === on);
+      b.disabled = !editable;
+    }
+    $('tradeDesc').textContent = (on
+      ? `Teammates can send each other materials in the shop, minus a ${Math.round(TRADE_TAX * 100)}% tax.`
+      : 'Everyone keeps what they pick up.') + (editable ? '' : ' (host picks)');
   }
 
   setDanger(danger, endless) {
@@ -583,6 +603,30 @@ export class UI {
     this.renderStats(you);
   }
 
+  /** Material transfer row. Rebuilt only on change, so the picker keeps its value. */
+  renderGive(trade, you, roster, myPid) {
+    const mates = [...roster.values()].filter((p) => p.id !== myPid && p.connected !== false);
+    const show = trade && !!you && mates.length > 0;
+    $('giveBox').classList.toggle('hidden', !show);
+    if (!show) return;
+    this._giveMats = you.mats;
+    const amt = Math.max(0, Math.floor(+$('giveAmt').value) || 0);
+    const key = JSON.stringify([mates.map((p) => [p.id, p.name]), you.mats, amt]);
+    if (key === this.lastGiveKey) return;
+    this.lastGiveKey = key;
+
+    const sel = $('giveTo');
+    const pick = sel.value;
+    const opts = mates.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+    if (sel.innerHTML !== opts) { sel.innerHTML = opts; if (mates.some((p) => String(p.id) === pick)) sel.value = pick; }
+    const send = Math.min(amt, you.mats);
+    const got = Math.floor(send * (1 - TRADE_TAX));
+    $('btnGive').disabled = got < 1;
+    $('giveNote').textContent = got >= 1
+      ? `They get ${got} · ${send - got} tax (${Math.round(TRADE_TAX * 100)}%)`
+      : `${Math.round(TRADE_TAX * 100)}% of every transfer is lost as tax`;
+  }
+
   renderInventory(you) {
     // Class progress: which sets you are building and how far along each is.
     const owned = classCounts(you.weapons);
@@ -655,7 +699,8 @@ export class UI {
   }
 
   // ----------------------------------------------------------- level up
-  renderLevelup(msg) {
+  /** @param you current stat sheet, for the "now -> after" line; optional. */
+  renderLevelup(msg, you) {
     const box = $('levelup');
     const open = !!(msg && msg.options);
     // The spectator bar shares this corner of the screen and has to move.
@@ -666,12 +711,24 @@ export class UI {
     $('luPending').textContent = msg.pending > 1 ? `(${msg.pending} pending)` : '';
     const opts = $('luOptions');
     opts.innerHTML = '';
+    // Which tiers this level can roll, and when the next one opens up.
+    const next = UPGRADE_TIER_LEVEL.find(([, lvl]) => msg.level < lvl);
+    $('luHint').innerHTML = [0, ...UPGRADE_TIER_LEVEL.map(([t]) => t)]
+      .map((t) => `<span style="color:${TIER_COLOR[t]}">${TIER_NAME[t]}</span>`).join(' &lt; ')
+      + (next ? ` · <span style="color:${TIER_COLOR[next[0]]}">${TIER_NAME[next[0]]}</span> upgrades from level ${next[1]}` : ' · all tiers unlocked');
     msg.options.forEach((o, i) => {
       const [k, v] = Object.entries(o.mods)[0];
-      const b = el('button', 'lu-opt');
-      b.title = STAT_LABEL[k];
-      b.innerHTML = `<canvas class="sicon" width="64" height="64" data-stat="${k}"></canvas>` +
-        `<span class="v">${fmtStat(k, v)}</span><span class="k">${STAT_LABEL[k]}</span>`;
+      const t = o.tier || 0;
+      const b = el('button', `lu-opt t${t}`);
+      b.style.setProperty('--tier', TIER_COLOR[t]);
+      b.title = `${TIER_NAME[t]} ${STAT_LABEL[k]}: ${STAT_DESC[k] || ''}`;
+      const now = you?.stats?.[k];
+      const pct = STAT_PCT.has(k) ? '%' : '';
+      b.innerHTML = `<span class="tier">${TIER_NAME[t]}</span>` +
+        `<canvas class="sicon" width="64" height="64" data-stat="${k}"></canvas>` +
+        `<span class="v">${fmtStat(k, v)}</span><span class="k">${STAT_LABEL[k]}</span>` +
+        `<span class="d">${STAT_DESC[k] || ''}</span>` +
+        (now != null ? `<span class="n">${Math.round(now)}${pct} &rarr; <b>${Math.round(now + v)}${pct}</b></span>` : '');
       b.onclick = () => this.cb.onPick(i);
       opts.appendChild(b);
     });

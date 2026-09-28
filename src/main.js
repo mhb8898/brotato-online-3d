@@ -232,6 +232,8 @@ class Game {
       onPick: (idx) => { sfx.buy(); this.sendControl({ t: 'levelpick', idx }); },
       onRestart: () => this.sendControl({ t: 'restart' }),
       onDanger: (v) => this.sendControl({ t: 'danger', v }),
+      onTrade: (v) => this.sendControl({ t: 'trade', v }),
+      onGive: (to, amt) => this.sendControl({ t: 'give', to, amt }),
       onContinue: () => { unlock(); this.sendControl({ t: 'continue' }); },
       onCopyLink: () => this.copyLink(),
       onNetTest: async () => {
@@ -480,6 +482,8 @@ class Game {
         this.ui.renderPlayers(next, this.myPid, msg.host, msg.phase);
         this.danger = msg.danger | 0;
         this.ui.renderDanger(this.danger, msg.host === this.myPid && msg.phase === PHASE.LOBBY);
+        this.trade = !!msg.trade;
+        this.ui.renderTrade(this.trade, msg.host === this.myPid && msg.phase === PHASE.LOBBY, next.size);
         if (msg.phase === PHASE.LOBBY) {
           this.ui.screen('lobby');
           this.ui.renderLevelup(null);
@@ -513,7 +517,7 @@ class Game {
         break;
       case 'level':
         this.levelMsg = msg.options ? msg : null;
-        this.ui.renderLevelup(this.levelMsg);
+        this.ui.renderLevelup(this.levelMsg, this.state.you);
         break;
       case 'wave':
         this.shop = null;
@@ -869,6 +873,7 @@ class Game {
       this.ui.updateHud(view, this.state.you, this.state.roster, this.myPid);
       if (view.phase === PHASE.SHOP) {
         this.ui.renderShop(this.shop, this.state.you, view.wave, view.timeLeft, this.state.roster, this.myPid);
+        this.ui.renderGive(this.trade, this.state.you, this.state.roster, this.myPid);
       }
       const me = view.players.find((p) => p.id === this.myPid);
       if (me) {
