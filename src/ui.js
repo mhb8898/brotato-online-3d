@@ -11,6 +11,8 @@ import {
   weaponAt, weaponName, weaponDps,
 } from './data.js';
 import { renderPortrait } from './render.js';
+import { CharStage } from './charstage.js';
+import { INTRO, LORE, quip, introSeen, markIntroSeen } from './story.js';
 import { renderIcon, paintStatIcons } from './icons.js';
 import * as progress from './progress.js';
 import { ZOOM_MIN, ZOOM_MAX } from './settings.js';
@@ -70,23 +72,25 @@ function classChips(id, owned) {
 }
 
 /** The full stat block for one weapon at one level. */
-function weaponBody(id, lvl, owned) {
+function weaponBody(id, lvl, owned, fold = false) {
   const def = weaponAt(id, lvl);
   const tags = weaponTags(def).map((x) => `<span class="tag">${x}</span>`).join('');
   const scales = [['melee', def.scale.m], ['ranged', def.scale.r], ['elem', def.scale.e]]
     .filter(([, m]) => m)
     .map(([k, m]) => `<span class="schip" title="${STAT_LABEL[k]} adds &times;${m}"><canvas class="sicon" width="40" height="40" data-stat="${k}"></canvas><b>&times;${m}</b></span>`)
     .join('');
+  const extra = `<div class="cls-row">${classChips(id, owned)}</div>` +
+    (scales ? `<div class="chips scales" title="Scales with">${scales}</div>` : '') +
+    (tags ? `<div class="tags">${tags}</div>` : '');
   return (
-    `<div class="cls-row">${classChips(id, owned)}</div>` +
+    (fold ? '' : extra) +
     `<div class="wstat icons">` +
     `<span class="schip" title="Damage per hit"><canvas class="sicon" width="40" height="40" data-stat="dmg"></canvas><b>${def.dmg}</b></span>` +
     `<span class="schip" title="Attacks per second"><canvas class="sicon" width="40" height="40" data-stat="atkSpeed"></canvas><b>${(1 / def.cd).toFixed(1)}/s</b></span>` +
     `<span class="schip" title="Range"><canvas class="sicon" width="40" height="40" data-stat="range"></canvas><b>${def.range}</b></span>` +
     `<span class="schip dps" title="Damage per second"><canvas class="sicon" width="40" height="40" data-stat="dps"></canvas><b>${Math.round(weaponDps(def))}</b><small>dps</small></span>` +
     `</div>` +
-    (scales ? `<div class="chips scales" title="Scales with">${scales}</div>` : '') +
-    (tags ? `<div class="tags">${tags}</div>` : '')
+    (fold ? `<div class="more">${extra}<p class="wdesc">${WEAPONS[id].desc}</p></div>` : '')
   );
 }
 
@@ -96,17 +100,95 @@ function fmtStat(k, v) {
   return `${sign}${Math.round(v)}`;
 }
 
+// --------------------------------------------------------------- intro art
+// Cheap 2D vignettes for the story panels, painted from the same portraits the
+// lobby uses. Each `art` key in story.js INTRO names one of these.
+const _portraits = new Map();
+function portrait(id) {
+  let c = _portraits.get(id);
+  if (!c) { c = document.createElement('canvas'); c.width = c.height = 160; renderPortrait(c, id); _portraits.set(id, c); }
+  return c;
+}
+function blob(g, x, y, r, color) {
+  g.fillStyle = 'rgba(0,0,0,.35)';
+  g.beginPath(); g.ellipse(x, y + r * 0.95, r * 0.9, r * 0.28, 0, 0, Math.PI * 2); g.fill();
+  const grd = g.createRadialGradient(x - r * 0.3, y - r * 0.4, r * 0.1, x, y, r);
+  grd.addColorStop(0, color); grd.addColorStop(1, '#1a0b12');
+  g.fillStyle = grd;
+  g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  for (const s of [-1, 1]) {
+    g.fillStyle = '#fff4d0';
+    g.beginPath(); g.arc(x + s * r * 0.33, y - r * 0.12, r * 0.2, 0, Math.PI * 2); g.fill();
+    g.fillStyle = '#2a0810';
+    g.beginPath(); g.arc(x + s * r * 0.3, y - r * 0.08, r * 0.1, 0, Math.PI * 2); g.fill();
+    // angry brow, slanting down to the middle
+    g.strokeStyle = '#1a0610'; g.lineWidth = Math.max(2, r * 0.09); g.lineCap = 'round';
+    g.beginPath(); g.moveTo(x + s * r * 0.55, y - r * 0.42); g.lineTo(x + s * r * 0.12, y - r * 0.26); g.stroke();
+  }
+  // a jagged grin
+  g.fillStyle = '#1a0610';
+  g.beginPath(); g.moveTo(x - r * 0.36, y + r * 0.3);
+  for (let k = 0; k <= 6; k++) g.lineTo(x - r * 0.36 + k * r * 0.12, y + r * (k % 2 ? 0.44 : 0.3));
+  g.lineTo(x + r * 0.36, y + r * 0.3); g.closePath(); g.fill();
+}
+function paintIntro(cv, art) {
+  const g = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  g.clearRect(0, 0, W, H);
+  const glow = (x, y, r, c) => {
+    const grd = g.createRadialGradient(x, y, 0, x, y, r);
+    grd.addColorStop(0, c); grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd; g.fillRect(0, 0, W, H);
+  };
+  const pot = (id, x, y, s, alpha = 1) => {
+    g.globalAlpha = alpha; g.drawImage(portrait(id), x - s / 2, y - s / 2, s, s); g.globalAlpha = 1;
+  };
+  if (art === 'cellar') {
+    glow(W / 2, H * 0.35, W * 0.45, 'rgba(255,200,120,.22)');
+    // light falling through the cellar hatch
+    for (const [x0, w] of [[0.36, 0.07], [0.47, 0.1], [0.6, 0.06]]) {
+      const grd = g.createLinearGradient(0, 0, 0, H * 0.85);
+      grd.addColorStop(0, 'rgba(255,220,160,.16)'); grd.addColorStop(1, 'rgba(255,220,160,0)');
+      g.fillStyle = grd;
+      g.beginPath(); g.moveTo(W * x0, 0); g.lineTo(W * (x0 + w), 0);
+      g.lineTo(W * (x0 + w + 0.08), H * 0.85); g.lineTo(W * (x0 + 0.05), H * 0.85); g.closePath(); g.fill();
+    }
+    [0, 3, 7, 1, 5].forEach((id, i) => pot(id, W * 0.2 + i * W * 0.15, H * 0.62 + (i % 2) * 14, 130, 0.85));
+  } else if (art === 'hunger') {
+    glow(W / 2, H, W * 0.6, 'rgba(176,38,255,.28)');
+    const foes = [['#e05f5f', 34], ['#f0a35e', 26], ['#8c6bb1', 48], ['#e05f5f', 30], ['#d94f8c', 36], ['#f0a35e', 24], ['#7ed957', 32]];
+    foes.forEach(([c, r], i) => blob(g, W * 0.1 + i * W * 0.13, H * 0.62 + Math.sin(i * 1.7) * 30, r * 1.3, c));
+  } else if (art === 'pit') {
+    glow(W / 2, H * 0.6, W * 0.5, 'rgba(255,59,107,.22)');
+    g.strokeStyle = 'rgba(255,255,255,.14)'; g.lineWidth = 3;
+    g.beginPath(); g.ellipse(W / 2, H * 0.68, W * 0.4, H * 0.24, 0, 0, Math.PI * 2); g.stroke();
+    blob(g, W / 2, H * 0.4, 70, '#ff3b6b');
+    [2, 4, 6].forEach((id, i) => pot(id, W * 0.3 + i * W * 0.2, H * 0.74, 100, 0.8));
+  } else {
+    glow(W / 2, H * 0.5, W * 0.55, 'rgba(255,200,87,.22)');
+    for (let i = 0; i < CHARACTERS.length; i++) {
+      const row = i < 4 ? 0 : 1;
+      const x = W * (0.2 + (i % 4) * 0.2) + (row ? W * 0.02 : -W * 0.02);
+      pot(i, x, H * (row ? 0.7 : 0.36), 138);
+    }
+  }
+}
+
 export class UI {
   constructor(cb) {
     this.cb = cb;
-    this.selChar = 0;
+    this.selChar = 0;        // the character you will play
+    this.viewChar = 0;       // the one on the stage; may be a locked preview
     this.lastShopKey = '';
     this.hostPid = 0;        // who may kick and force-start, per the last lobby msg
     this.phase = 0;
     this.kickArmed = 0;      // pid whose kick button is waiting for a confirming click
     this.kickTimer = null;
+    this.introStep = 0;
     this.bind();
+    this.stage = new CharStage($('charStage'), () => this.markChar());
     this.buildChars();
+    this.buildIntro();
   }
 
   bind() {
@@ -168,8 +250,32 @@ export class UI {
     // Sound is stored inverted (muted), so the toggle reads the opposite way.
     $('setSound').onclick = () => c.onMute();
     addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') $('settings').classList.add('hidden');
+      if (e.key === 'Escape') { $('settings').classList.add('hidden'); if (!$('intro').classList.contains('hidden')) this.closeIntro(); }
+      // Left / right flip through the cast on the character screen.
+      const t = e.target;
+      const typing = t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA');
+      if (typing || $('lobby').classList.contains('hidden') || !$('intro').classList.contains('hidden')) return;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const n = CHARACTERS.length;
+        this.pickChar((this.viewChar + (e.key === 'ArrowLeft' ? n - 1 : 1)) % n, true);
+      }
     });
+
+    // ---- story
+    $('btnStory').onclick = () => this.openIntro();
+    $('introSkip').onclick = () => this.closeIntro();
+    $('introBack').onclick = () => this.introGo(this.introStep - 1);
+    $('introNext').onclick = () => (this.introStep >= INTRO.length - 1 ? this.closeIntro() : this.introGo(this.introStep + 1));
+    $('intro').onclick = (e) => { if (e.target.id === 'intro') this.closeIntro(); };
+
+    // ---- shop tabs (only visible on narrow screens; wide ones show all three)
+    for (const b of $('shopTabs').children) {
+      b.onclick = () => {
+        for (const x of $('shopTabs').children) x.classList.toggle('on', x === b);
+        for (const p of document.querySelectorAll('.shop-lower .panel')) p.classList.toggle('off', p.dataset.tab !== b.dataset.tab);
+      };
+    }
 
     $('nameInput').value = localStorage.getItem('pr_name') || '';
     this.renderRecords();
@@ -189,7 +295,10 @@ export class UI {
   screen(name) {
     for (const s of ['menu', 'lobby', 'shop', 'over']) $(s).classList.toggle('hidden', s !== name);
     $('hud').classList.toggle('hidden', name === 'menu' || name === 'over');
+    $('app').dataset.screen = name;
     if (name !== 'shop') this.lastShopKey = '';
+    // The turntable only spins while someone can see it.
+    if (name === 'lobby') { this.stage.start(); this.stage.resize?.(); } else this.stage.stop();
   }
 
   connecting(text) { this.pane('menuConnecting'); $('connTxt').textContent = text; }
@@ -294,53 +403,136 @@ export class UI {
   get playerName() { return ($('nameInput').value || '').trim().slice(0, 14) || 'Spud'; }
 
   // -------------------------------------------------------------- lobby
+  /** The strip of round portraits under the stage. */
   buildChars() {
     const grid = $('charGrid');
     grid.innerHTML = '';
     for (const ch of CHARACTERS) {
       const node = el('button', 'char');
       node.dataset.id = ch.id;
-      node.title = `${ch.desc}\nStarts with ${WEAPONS[ch.weapon].name}: ${WEAPONS[ch.weapon].desc}`;
+      node.setAttribute('role', 'option');
+      node.title = ch.name;
+      node.style.setProperty('--c', ch.color);
       node.innerHTML =
-        `<span class="best-badge hidden"></span>` +
-        `<canvas class="portrait" width="128" height="128"></canvas>` +
-        `<h4>${ch.name}</h4><p>${ch.desc}</p>` +
-        `<div class="pill wpn"><canvas class="icon xs" width="48" height="48"></canvas>${WEAPONS[ch.weapon].name}</div>` +
-        modChips(ch.mods, 'center') +
-        `<div class="lock-veil"><b>&#128274;</b><span></span></div>`;
-      node.onclick = () => {
-        if (!progress.isUnlocked(ch.id)) { this.toast(`${ch.name}: ${progress.UNLOCKS[ch.id].hint}`, 'warn'); return; }
-        this.selChar = ch.id; this.markChar(); this.cb.onChar(ch.id);
-      };
+        `<canvas class="portrait" width="96" height="96"></canvas>` +
+        `<span class="nm">${ch.name}</span>` +
+        `<span class="best-dot hidden"></span>` +
+        `<span class="lock-ico" aria-hidden="true">&#128274;</span>`;
+      node.onclick = () => this.pickChar(ch.id);
       grid.appendChild(node);
       renderPortrait(node.querySelector('.portrait'), ch.id);
-      renderIcon(node.querySelector('.icon'), 'weapon', ch.weapon);
-      paintStatIcons(node);
     }
     this.refreshChars();
   }
 
-  /** Lock state and best-wave badges, re-read from progress. Cheap, call often. */
+  /**
+   * Put a character on the stage. An unlocked one also becomes your pick; a
+   * locked one is only previewed, as a silhouette with its unlock hint.
+   */
+  pickChar(id, fromKeys = false) {
+    this.viewChar = id;
+    if (progress.isUnlocked(id) && id !== this.selChar) { this.selChar = id; this.cb.onChar(id); }
+    this.markChar();
+    if (fromKeys) $('charGrid').children[id]?.focus({ preventScroll: true });
+  }
+
+  /** Lock state and best-wave marks, re-read from progress. Cheap, call often. */
   refreshChars() {
     for (const n of $('charGrid').children) {
       const id = +n.dataset.id;
-      const locked = !progress.isUnlocked(id);
-      n.classList.toggle('locked', locked);
-      if (locked) n.querySelector('.lock-veil span').textContent = progress.UNLOCKS[id].hint;
+      n.classList.toggle('locked', !progress.isUnlocked(id));
       const best = progress.bestWave(id);
-      const badge = n.querySelector('.best-badge');
-      badge.classList.toggle('hidden', !best);
-      if (best) {
-        badge.textContent = best > MAX_WAVE ? `Endless ${best}` : best >= MAX_WAVE ? 'Cleared' : `Wave ${best}`;
-        badge.classList.toggle('won', best >= MAX_WAVE);
-      }
+      const dot = n.querySelector('.best-dot');
+      dot.classList.toggle('hidden', !best);
+      dot.classList.toggle('won', best >= MAX_WAVE);
     }
     if (!progress.isUnlocked(this.selChar)) { this.selChar = 0; this.cb.onChar?.(0); }
     this.markChar();
   }
 
   markChar() {
-    for (const n of $('charGrid').children) n.classList.toggle('sel', +n.dataset.id === this.selChar);
+    const id = this.viewChar;
+    const ch = CHARACTERS[id] || CHARACTERS[0];
+    const lore = LORE[id] || LORE[0];
+    const locked = !progress.isUnlocked(id);
+    this._previewing = locked;
+    for (const n of $('charGrid').children) {
+      const nid = +n.dataset.id;
+      n.classList.toggle('sel', nid === this.selChar);
+      n.classList.toggle('view', nid === id);
+      n.setAttribute('aria-selected', nid === id ? 'true' : 'false');
+    }
+
+    // stage: 3D when the art is in, the flat portrait until then
+    this.stage.show(id, locked);
+    const flat = !this.stage.ready;
+    $('stageBox').classList.toggle('flat', flat);
+    $('stageBox').classList.toggle('locked', locked);
+    $('stageBox').style.setProperty('--c', locked ? '#3a3d4d' : ch.color);
+    if (flat) renderPortrait($('charFallback'), id);
+
+    // info panel
+    const w = WEAPONS[ch.weapon];
+    $('charEpithet').textContent = lore.epithet;
+    $('charName').textContent = ch.name;
+    $('charBio').textContent = lore.bio;
+    $('charLock').classList.toggle('hidden', !locked);
+    if (locked) $('charLock').innerHTML = `&#128274; Locked &middot; ${esc(progress.UNLOCKS[id].hint)} to unlock`;
+    $('charWpn').textContent = w.name;
+    $('charWpnDesc').textContent = w.desc;
+    renderIcon($('charWpnIcon'), 'weapon', ch.weapon);
+    $('charMods').innerHTML = modChips(ch.mods);
+    paintStatIcons($('charMods'));
+    const best = progress.bestWave(id);
+    $('charBest').classList.toggle('hidden', !best);
+    if (best) $('charBest').textContent = best > MAX_WAVE ? `Best: endless wave ${best}` : best >= MAX_WAVE ? 'Best: cleared the Pit' : `Best: wave ${best}`;
+    this.syncReady();
+  }
+
+  /** Ready is off while a locked character is on the stage: you cannot play it. */
+  syncReady() {
+    const b = $('btnReady');
+    const locked = this._previewing;
+    b.disabled = !!locked;
+    if (locked) b.textContent = 'Locked';
+    else b.textContent = this._meReady ? 'Not ready' : 'Ready';
+    b.classList.toggle('primary', !this._meReady);
+  }
+
+  // ---------------------------------------------------------------- story
+  buildIntro() {
+    $('introDots').innerHTML = INTRO.map((_, i) => `<i data-i="${i}"></i>`).join('');
+    for (const d of $('introDots').children) d.onclick = () => this.introGo(+d.dataset.i);
+  }
+
+  /** Called once at boot: first-time players get the story before the menu. */
+  maybeIntro() { if (!introSeen()) this.openIntro(); }
+
+  openIntro() {
+    $('intro').classList.remove('hidden');
+    this.introGo(0);
+    $('introNext').focus({ preventScroll: true });
+  }
+
+  closeIntro() {
+    $('intro').classList.add('hidden');
+    markIntroSeen();
+  }
+
+  introGo(i) {
+    this.introStep = Math.max(0, Math.min(INTRO.length - 1, i));
+    const p = INTRO[this.introStep];
+    $('introStep').textContent = `${this.introStep + 1} / ${INTRO.length}`;
+    $('introTitle').textContent = p.title;
+    $('introText').textContent = p.text;
+    $('introBack').disabled = this.introStep === 0;
+    const last = this.introStep === INTRO.length - 1;
+    $('introNext').textContent = last ? 'Into the Pit' : 'Next';
+    $('introSkip').classList.toggle('invisible', last);
+    [...$('introDots').children].forEach((d, k) => d.classList.toggle('on', k === this.introStep));
+    const card = $('intro').querySelector('.intro-card');
+    card.classList.remove('turn'); void card.offsetWidth; card.classList.add('turn');
+    paintIntro($('introArt'), p.art);
   }
 
   /**
@@ -403,14 +595,14 @@ export class UI {
       const li = el('li');
       li.innerHTML =
         `<span class="dot" style="background:${ch.color}"></span>` +
-        `<span>${esc(p.name)}${pid === myPid ? ' <small style="color:#98a0b5">(you)</small>' : ''}</span>` +
-        `<span class="tick ${p.ready ? 'ok' : ''}">${p.connected === false ? 'away' : p.ready ? 'READY' : 'picking…'}</span>`;
+        `<span class="pname">${esc(p.name)}${pid === myPid ? ' <small>you</small>' : ''}</span>` +
+        `<span class="tick ${p.ready ? 'ok' : ''}">${p.connected === false ? 'away' : p.ready ? '&#10003; Ready' : 'Picking'}</span>`;
       if (amHost && pid !== myPid) li.appendChild(this.kickButton(pid, p.name));
       list.appendChild(li);
     }
     const me = roster.get(myPid);
-    $('btnReady').textContent = me?.ready ? 'Not ready' : 'Ready';
-    $('btnReady').classList.toggle('primary', !me?.ready);
+    this._meReady = !!me?.ready;
+    this.syncReady();
 
     // Waiting on someone who wandered off is the single most common way a
     // lobby dies, so the host gets to close it without them.
@@ -462,18 +654,14 @@ export class UI {
     const dur = waveDuration(view.wave || 1);
     const frac = Math.max(0, Math.min(1, view.timeLeft / dur));
     $('timerFill').style.width = `${frac * 100}%`;
-    $('timerFill').style.background = frac < 0.25
-      ? 'linear-gradient(90deg,#d64b4b,#ff7e7e)'
-      : 'linear-gradient(90deg,#4b7bd6,#7ea6ff)';
+    $('timerFill').classList.toggle('low', frac < 0.25);
     $('timerTxt').textContent = Math.ceil(view.timeLeft);
 
     const me = view.players.find((p) => p.id === pid);
     if (me) {
       const pct = Math.max(0, me.hp / me.maxHp) * 100;
       $('hpFill').style.width = `${pct}%`;
-      $('hpFill').style.background = pct < 30
-        ? 'linear-gradient(90deg,#a33f3f,#ff5c5c)'
-        : 'linear-gradient(90deg,#3fa34d,#7ee081)';
+      $('hpFill').classList.toggle('low', pct < 30);
       $('hpTxt').textContent = `${Math.ceil(me.hp)} / ${me.maxHp}`;
     }
     if (you) {
@@ -484,7 +672,7 @@ export class UI {
       if (key !== this._wkey) {
         this._wkey = key;
         $('weaponRow').innerHTML = you.weapons
-          .map((w) => `<span class="weapon-chip" style="border-color:${TIER_COLOR[w.tier - 1]}66"><canvas class="icon xs" width="48" height="48"></canvas>${w.name}</span>`)
+          .map((w) => `<span class="weapon-chip" title="${esc(w.name)}" style="--tier:${TIER_COLOR[w.tier - 1]}"><canvas class="icon xs" width="48" height="48"></canvas></span>`)
           .join('');
         $('weaponRow').querySelectorAll('.icon').forEach((c, i) => renderIcon(c, 'weapon', you.weapons[i].id, you.weapons[i].lvl));
       }
@@ -502,7 +690,7 @@ export class UI {
       const away = info.connected === false;
       html +=
         `<div class="team-row ${down || away ? 'down' : ''}" data-pid="${p.id}" title="${away ? 'Disconnected' : ''}">` +
-        `<div class="nm"><span class="dot" style="background:${ch.color}"></span>${esc(info.name)}${away ? ' <small>away</small>' : ''}</div>` +
+        `<div class="nm"><span class="dot" style="background:${ch.color}"></span><span class="tn">${esc(info.name)}</span>${away ? ' <small>away</small>' : ''}</div>` +
         `<div class="bar"><i style="width:${down ? 100 : Math.round(Math.max(0, (p.hp / p.maxHp) * 100))}%"></i></div></div>`;
     }
     // Reparsing this every frame forced a full layout 60x a second for nothing.
@@ -553,14 +741,14 @@ export class UI {
     shop.offers.forEach((o, i) => {
       const card = el('div', `offer ${o?.sold ? 'sold' : ''}`);
       if (!o) { box.appendChild(card); return; }
-      card.style.borderTopColor = TIER_COLOR[o.tier];
+      card.style.setProperty('--tier', TIER_COLOR[o.tier]);
 
       // Buying a duplicate merges instead of taking a slot, so it stays legal
       // at full slots - and saying so is the only way anyone would try it.
       const merges = o.kind === 'weapon' && you.weapons.some((w) => w.id === o.id && w.lvl === 1);
       let body;
       if (o.kind === 'weapon') {
-        body = weaponBody(o.id, 1, owned);
+        body = weaponBody(o.id, 1, owned, true);
         if (merges) {
           body += `<div class="merge">Combines with your ${WEAPONS[o.id].name}` +
             ` &rarr; <b>${weaponName(o.id, 2)}</b></div>`;
@@ -591,7 +779,8 @@ export class UI {
         `<h4>${o.name}</h4></div></div>${body}` +
         `<button class="btn buy ${afford && !o.sold && !full ? 'primary' : ''}" ${o.sold || !afford || full ? 'disabled' : ''}>` +
         `${o.sold ? 'Bought' : full ? 'Slots full' : merges ? `Combine ${o.price}` : `Buy ${o.price}`}</button>`;
-      if (o.kind === 'weapon') card.title = WEAPONS[o.id].desc;
+      // Tap toggles the folded details on touch screens; hover does it elsewhere.
+      if (o.kind === 'weapon') card.onclick = (e) => { if (!e.target.closest('button')) card.classList.toggle('open'); };
       renderIcon(card.querySelector('.icon'), o.kind, o.id);
       paintStatIcons(card);
       card.querySelector('.lock').onclick = () => this.cb.onLock(i);
@@ -772,6 +961,12 @@ export class UI {
         `<span class="k">${s.kills} kills &middot; lv ${s.level}</span>`;
       list.appendChild(li);
     }
+    const cid = opts.char ?? this.selChar;
+    const ch = CHARACTERS[cid] || CHARACTERS[0];
+    renderPortrait($('overPortrait'), cid);
+    $('overQuipTxt').textContent = `\u201C${quip(cid, !!msg.win)}\u201D`;
+    $('overQuipWho').textContent = `${ch.name}, ${(LORE[cid] || LORE[0]).epithet.toLowerCase()}`;
+    $('overQuip').style.setProperty('--c', ch.color);
     $('btnAgain').classList.toggle('hidden', !canRestart);
     $('overHint').textContent = canRestart ? '' : 'Waiting for the host to start a new run.';
   }

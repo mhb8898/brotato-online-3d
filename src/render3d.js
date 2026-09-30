@@ -24,7 +24,7 @@
 import * as THREE from 'three';
 import { ARENA, CHARACTERS, ENEMIES, WEAPONS, TIER_COLOR } from './data.js';
 import { FX, PROJ_KINDS } from './protocol.js';
-import { loadAssets } from './assets3d.js';
+import { loadAssets, artMaterial } from './assets3d.js';
 import { drawSpawnMark } from './render.js';
 
 const TAU = Math.PI * 2;
@@ -472,17 +472,7 @@ export class Renderer {
 
   /** Shared materials for baked Blender models; colour lives in the vertices. */
   artMat(kind) {
-    return this.mat(`art-${kind}`, () => {
-      switch (kind) {
-        // no environment map in this scene, so real metalness would read as
-        // black; a little metalness and low roughness keeps the sheen
-        case 'metal': return new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.32, metalness: 0.35 });
-        case 'glow': return new THREE.MeshBasicMaterial({ vertexColors: true, fog: false });
-        case 'face': return new THREE.MeshBasicMaterial({ vertexColors: true });
-        case 'proj': return new THREE.MeshBasicMaterial({ vertexColors: true, fog: false });
-        default: return new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, metalness: 0.02 });
-      }
-    });
+    return this.mat(`art-${kind}`, () => artMaterial(kind));
   }
 
   /** Remove every object a pool ever made (materials and geometry are shared, so kept). */

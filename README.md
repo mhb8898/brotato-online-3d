@@ -121,6 +121,25 @@ pausing is exactly the behaviour you want.
 mouse wheel zoom. You face the way you move and every weapon targets the
 nearest enemy on its own. Touch devices get a virtual stick.
 
+### The story
+
+Under an old farm, a cellar of potatoes is herded into the **Pit** by the
+Warden and fed to the **Hunger**, the rot that eats anything with a root.
+Eight of them refuse to be mashed: last twenty waves, beat the Devourer, go
+home. A four-panel intro tells this on first launch (replay it from **Story**
+on the menu). Every character has an epithet and a short bio on the select
+screen, and says a line in their own voice when a run ends. All of it lives in
+`src/story.js`; the simulation never reads it.
+
+### Character select
+
+The selected potato stands on a lit stage as the real Blender model, holding
+its starting weapon. It sways, hops when you switch, and spins when dragged.
+`←`/`→` flip through the cast. Locked characters show as a silhouette with
+their unlock hint. The stage (`src/charstage.js`) is its own small WebGL view,
+so it works with Display set to 2D, and it falls back to the flat portrait
+when WebGL or the art is unavailable.
+
 ---
 
 ## Settings, spectating and the host's controls
@@ -262,6 +281,8 @@ src/
   render3d.js       Three.js renderer: arena, models, floating weapons, effects
   assets3d.js       loads assets/*.glb and bakes them into a few draw calls each
   ui.js             DOM panels, driven purely by control messages
+  charstage.js      the 3D character-select stage
+  story.js          intro panels, character bios and end-of-run lines (words only)
   audio.js          procedural WebAudio sfx, zero asset files
   main.js           mode wiring, sim clock, render loop
 assets/             Blender output: characters, weapons, projectiles, enemies,

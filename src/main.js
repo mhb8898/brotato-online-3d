@@ -173,6 +173,7 @@ class Game {
       this.ui.renderSettings(s);
     });
     this.ui.screen('menu');
+    this.ui.maybeIntro();
 
     // ?r=CODE deep link: an invite link should drop you straight at the code box.
     const room = new URLSearchParams(location.search).get('r');
@@ -546,6 +547,7 @@ class Game {
         this.ui.renderOver(msg, true, {
           canContinue: !!msg.canContinue && this.isSim,
           newBest: msg.wave > best,
+          char: this.myChar,
         });
         this.ui.screen('over');
         if (msg.win) sfx.win(); else sfx.over();

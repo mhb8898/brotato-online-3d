@@ -107,7 +107,30 @@ const byName = (scene, name) => scene.getObjectByName(name);
  *   floor, floorBump, sprites                                    (textures)
  * Each file is optional; a missing one just leaves its key out.
  */
-export async function loadAssets() {
+let pending = null;
+/** Memoised: the arena renderer and the character stage share one download. */
+export function loadAssets() {
+  if (!pending) pending = load();
+  return pending;
+}
+
+/**
+ * Materials for baked parts; colour lives in the vertices. Fresh instances -
+ * callers cache them (Renderer.artMat, CharStage).
+ */
+export function artMaterial(kind) {
+  switch (kind) {
+    // no environment map in these scenes, so real metalness would read as
+    // black; a little metalness and low roughness keeps the sheen
+    case 'metal': return new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.32, metalness: 0.35 });
+    case 'glow': return new THREE.MeshBasicMaterial({ vertexColors: true, fog: false });
+    case 'face': return new THREE.MeshBasicMaterial({ vertexColors: true });
+    case 'proj': return new THREE.MeshBasicMaterial({ vertexColors: true, fog: false });
+    default: return new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, metalness: 0.02 });
+  }
+}
+
+async function load() {
   const loader = new GLTFLoader();
   const soft = (p) => p.catch((e) => { console.warn('[assets]', e?.message || e); return null; });
   const [chars, weps, projs, foes, arena, floor, floorBump, sprites] = await Promise.all([

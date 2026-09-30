@@ -7,6 +7,9 @@
 <meta name="description" content="A browser co-op arena survival roguelite. Peer-to-peer over WebRTC, no server required.">
 <meta name="theme-color" content="#07080d">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥔</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600&display=swap">
 <link rel="stylesheet" href="./style.css">
 <!-- PeerJS provides only the WebRTC signalling handshake. Once peers are
      connected all game traffic is direct peer-to-peer. -->
@@ -21,18 +24,23 @@
   <!-- ==================== In-game HUD ==================== -->
   <div id="hud" class="hidden">
     <div class="hud-top">
-      <div class="hud-box" id="waveBox"><span class="lbl">WAVE</span><b id="waveNum">1</b><span id="dangerTag" class="danger-tag hidden"></span></div>
-      <div class="hud-timer"><div id="timerFill"></div><span id="timerTxt">20</span></div>
-      <div class="hud-box" id="matBox"><span class="lbl">MATERIALS</span><b id="matNum">0</b></div>
+      <div class="wave-pill" id="waveBox">
+        <span class="wave-lbl">Wave <b id="waveNum">1</b></span>
+        <span id="dangerTag" class="danger-tag hidden"></span>
+        <span class="wave-time"><b id="timerTxt">20</b>s</span>
+        <div class="hud-timer"><div id="timerFill"></div></div>
+      </div>
     </div>
+    <div class="hud-mats" id="matBox" title="Materials"><i class="mat-ico"></i><b id="matNum">0</b></div>
 
     <div class="hud-self">
-      <div class="hp-row">
-        <div class="hp-bar"><div id="hpFill"></div><span id="hpTxt">10 / 10</span></div>
-        <div class="lvl-chip">LV <b id="lvlNum">1</b></div>
+      <div id="weaponRow" class="weapon-row"></div>
+      <div class="hp-bar">
+        <div id="hpFill"></div>
+        <span class="hp-lvl">Lv <b id="lvlNum">1</b></span>
+        <span id="hpTxt">10 / 10</span>
       </div>
       <div class="xp-bar"><div id="xpFill"></div></div>
-      <div id="weaponRow" class="weapon-row"></div>
     </div>
 
     <div id="teamPanel" class="team-panel"></div>
@@ -41,7 +49,7 @@
     <!-- Shown only while you are down and the wave is still running. -->
     <div id="spectate" class="spectate hidden">
       <div class="spec-head">
-        <span class="lbl">SPECTATING</span>
+        <span class="lbl">Spectating</span>
         <span id="specHint" class="spec-hint"></span>
       </div>
       <div class="spec-main">
@@ -63,33 +71,31 @@
   <!-- ==================== Main menu ==================== -->
   <section id="menu" class="screen">
     <div class="menu-card">
-      <h1>POTATO <span>ROYALE</span> <small class="threed">3D</small></h1>
-      <p class="tag">Co-op arena survival. Peer-to-peer, no server, no install.</p>
+      <h1 class="title">Potato <span>Royale</span><small class="threed">3D</small></h1>
+      <p class="tag">Survive the Pit together. Up to 8 potatoes, no install.</p>
 
       <div id="menuMain" class="menu-pane">
-        <label class="field">
-          <span>Your name</span>
-          <input id="nameInput" maxlength="14" placeholder="Spud" autocomplete="off">
-        </label>
+        <input id="nameInput" class="input" maxlength="14" placeholder="Your name" aria-label="Your name" autocomplete="off">
         <div class="btn-col">
-          <button id="btnSolo" class="btn primary">Play solo</button>
-          <button id="btnHost" class="btn">Host an online game</button>
-          <button id="btnJoinPane" class="btn">Join with a code</button>
+          <button id="btnSolo" class="btn primary big">Play solo</button>
+          <div class="btn-row">
+            <button id="btnHost" class="btn">Host game</button>
+            <button id="btnJoinPane" class="btn">Join</button>
+          </div>
         </div>
-        <p class="hint">Up to 8 players. The host runs the game world, so pick whoever has the best connection.</p>
         <p id="records" class="records hidden"></p>
-        <button id="btnSettingsMenu" class="btn link">Settings</button>
-        <button id="btnNetTest" class="btn link">Test my connection</button>
+        <nav class="links">
+          <button id="btnStory" class="btn link">Story</button>
+          <button id="btnSettingsMenu" class="btn link">Settings</button>
+          <button id="btnNetTest" class="btn link">Test connection</button>
+        </nav>
         <div id="netTest" class="net-test hidden"></div>
       </div>
 
       <div id="menuJoin" class="menu-pane hidden">
-        <label class="field">
-          <span>Room code</span>
-          <input id="codeInput" maxlength="5" placeholder="ABCDE" autocomplete="off" spellcheck="false">
-        </label>
+        <input id="codeInput" class="input" maxlength="5" placeholder="ABCDE" aria-label="Room code" autocomplete="off" spellcheck="false">
         <div class="btn-col">
-          <button id="btnJoin" class="btn primary">Connect</button>
+          <button id="btnJoin" class="btn primary big">Connect</button>
           <button id="btnBack" class="btn ghost">Back</button>
         </div>
         <p id="joinErr" class="err"></p>
@@ -101,62 +107,85 @@
         <button id="btnCancel" class="btn ghost">Cancel</button>
       </div>
     </div>
-    <footer class="credit">WASD / arrows to move &middot; you face where you go &middot; weapons fire themselves</footer>
+    <footer class="credit">WASD or arrows to move &middot; weapons fire themselves</footer>
   </section>
 
-  <!-- ==================== Lobby ==================== -->
+  <!-- ==================== Lobby / character select ==================== -->
   <section id="lobby" class="screen hidden">
-    <div class="lobby-card">
-      <div class="lobby-head">
+    <div class="lobby">
+      <header class="lobby-top">
         <div>
-          <h2>Lobby</h2>
+          <h2>Choose your potato</h2>
           <p class="sub" id="lobbySub">Pick a character, then ready up.</p>
         </div>
-        <div id="roomBox" class="room-box hidden">
-          <span class="lbl">ROOM CODE</span>
+        <div id="roomBox" class="room-chip hidden">
+          <span class="lbl">Room</span>
           <b id="roomCode">-----</b>
-          <button id="btnCopy" class="btn tiny">Copy invite link</button>
+          <button id="btnCopy" class="btn tiny">Copy link</button>
+        </div>
+      </header>
+
+      <div class="stage-row">
+        <div class="stage" id="stageBox">
+          <canvas id="charStage" aria-label="3D preview of the selected character"></canvas>
+          <canvas id="charFallback" width="360" height="360" aria-hidden="true"></canvas>
+          <small class="stage-hint">Drag to spin</small>
+        </div>
+        <div class="char-info">
+          <span class="epithet" id="charEpithet"></span>
+          <h3 id="charName">Wanderer</h3>
+          <p id="charBio" class="bio"></p>
+          <p id="charLock" class="lock-note hidden"></p>
+          <div class="starter">
+            <canvas id="charWpnIcon" class="icon sm" width="72" height="72"></canvas>
+            <div><b id="charWpn"></b><small id="charWpnDesc"></small></div>
+          </div>
+          <div id="charMods"></div>
+          <p id="charBest" class="char-best hidden"></p>
         </div>
       </div>
 
-      <div class="lobby-body">
-        <div class="char-grid" id="charGrid"></div>
-        <aside class="lobby-side">
-          <h3>Players</h3>
+      <div class="char-strip" id="charGrid" role="listbox" aria-label="Characters"></div>
+
+      <footer class="lobby-foot">
+        <div class="lobby-people">
           <ul id="playerList" class="player-list"></ul>
-          <div id="dangerBox" class="danger-box">
-            <span class="lbl">DANGER</span>
-            <div id="dangerOpts" class="danger-opts"></div>
-            <p id="dangerDesc" class="sub"></p>
-          </div>
-          <div id="tradeBox" class="danger-box hidden">
-            <span class="lbl">MATERIAL SHARING</span>
-            <div id="tradeOpts" class="danger-opts">
-              <button class="dopt" data-v="0">Off</button>
-              <button class="dopt" data-v="1">On</button>
+          <div class="lobby-opts">
+            <div id="dangerBox" class="opt-group">
+              <span class="lbl">Danger</span>
+              <div id="dangerOpts" class="danger-opts"></div>
+              <p id="dangerDesc" class="opt-desc"></p>
             </div>
-            <p id="tradeDesc" class="sub"></p>
+            <div id="tradeBox" class="opt-group hidden">
+              <span class="lbl">Sharing</span>
+              <div id="tradeOpts" class="danger-opts">
+                <button class="dopt" data-v="0">Off</button>
+                <button class="dopt" data-v="1">On</button>
+              </div>
+              <p id="tradeDesc" class="opt-desc"></p>
+            </div>
           </div>
-          <button id="btnReady" class="btn primary wide">Ready</button>
-          <button id="btnForceStart" class="btn wide hidden">Start now</button>
-          <button id="btnLeave" class="btn ghost wide">Leave</button>
-        </aside>
-      </div>
+        </div>
+        <div class="lobby-actions">
+          <button id="btnLeave" class="btn ghost">Leave</button>
+          <button id="btnForceStart" class="btn hidden">Start now</button>
+          <button id="btnReady" class="btn primary big">Ready</button>
+        </div>
+      </footer>
     </div>
   </section>
 
   <!-- ==================== Shop ==================== -->
   <section id="shop" class="screen hidden">
-    <div class="shop-card">
+    <div class="shop">
       <header class="shop-head">
         <div>
           <h2>Shop</h2>
-          <p class="sub">Wave <b id="shopNext">2</b> starts when everyone is ready.</p>
-          <p class="sub summary" id="shopSummary"></p>
+          <p class="sub">Wave <b id="shopNext">2</b> starts when everyone is ready <span class="summary" id="shopSummary"></span></p>
         </div>
         <div class="shop-meta">
-          <div class="hud-box"><span class="lbl">MATERIALS</span><b id="shopMats">0</b></div>
-          <div class="hud-box"><span class="lbl">AUTO-START</span><b id="shopTimer">--</b></div>
+          <span class="meta-pill mats" title="Materials"><i class="mat-ico"></i><b id="shopMats">0</b></span>
+          <span class="meta-pill" title="Auto-start"><span class="lbl">Auto</span><b id="shopTimer">--</b></span>
         </div>
       </header>
 
@@ -164,30 +193,35 @@
 
       <div class="shop-actions">
         <button id="btnReroll" class="btn">Reroll <b id="rerollCost">2</b></button>
-        <button id="btnGo" class="btn primary">Ready for next wave</button>
         <button id="btnShopForce" class="btn hidden">Start wave now</button>
+        <button id="btnGo" class="btn primary">Ready for next wave</button>
       </div>
 
       <div id="giveBox" class="give-box hidden">
-        <span class="lbl">SEND MATERIALS</span>
+        <span class="lbl">Send materials</span>
         <select id="giveTo" aria-label="Teammate"></select>
         <input id="giveAmt" type="number" min="1" step="1" value="10" aria-label="Amount">
         <button id="giveAll" class="btn tiny">All</button>
-        <button id="btnGive" class="btn">Send</button>
+        <button id="btnGive" class="btn tiny">Send</button>
         <small id="giveNote"></small>
       </div>
 
+      <nav class="tabs" id="shopTabs">
+        <button data-tab="w" class="on">Weapons</button>
+        <button data-tab="i">Items</button>
+        <button data-tab="s">Stats</button>
+      </nav>
       <div class="shop-lower">
-        <div class="panel">
+        <div class="panel" data-tab="w">
           <h3>Weapons <small id="wslots"></small></h3>
           <div id="classRow" class="class-row"></div>
           <div id="invWeapons" class="inv-grid"></div>
         </div>
-        <div class="panel">
+        <div class="panel off" data-tab="i">
           <h3>Items</h3>
           <div id="invItems" class="inv-grid"></div>
         </div>
-        <div class="panel stats-panel">
+        <div class="panel off stats-panel" data-tab="s">
           <h3>Stats</h3>
           <div id="statList" class="stat-list"></div>
         </div>
@@ -197,7 +231,7 @@
 
   <!-- ==================== Level-up (non-blocking) ==================== -->
   <div id="levelup" class="levelup hidden">
-    <div class="levelup-head">Level <b id="luLevel">2</b> &mdash; choose an upgrade <span id="luPending"></span></div>
+    <div class="levelup-head">Level <b id="luLevel">2</b> &middot; choose an upgrade <span id="luPending"></span></div>
     <div id="luHint" class="lu-hint"></div>
     <div id="luOptions" class="lu-options"></div>
   </div>
@@ -208,6 +242,10 @@
       <h2 id="overTitle">Run over</h2>
       <p class="sub" id="overSub"></p>
       <p class="best hidden" id="overBest"></p>
+      <figure id="overQuip" class="quip">
+        <canvas id="overPortrait" width="128" height="128"></canvas>
+        <blockquote><p id="overQuipTxt"></p><cite id="overQuipWho"></cite></blockquote>
+      </figure>
       <ul id="scoreList" class="score-list"></ul>
       <div class="btn-col">
         <button id="btnContinue" class="btn primary hidden">Continue into endless</button>
@@ -217,6 +255,24 @@
       <p class="hint" id="overHint"></p>
     </div>
   </section>
+
+  <!-- ==================== Story intro ==================== -->
+  <div id="intro" class="modal intro hidden" role="dialog" aria-modal="true" aria-labelledby="introTitle">
+    <div class="intro-card">
+      <canvas id="introArt" width="880" height="360" aria-hidden="true"></canvas>
+      <div class="intro-text">
+        <span class="lbl" id="introStep">1 / 4</span>
+        <h2 id="introTitle"></h2>
+        <p id="introText"></p>
+      </div>
+      <footer class="intro-foot">
+        <button id="introSkip" class="btn ghost">Skip</button>
+        <div id="introDots" class="dots"></div>
+        <button id="introBack" class="btn">Back</button>
+        <button id="introNext" class="btn primary">Next</button>
+      </footer>
+    </div>
+  </div>
 
   <!-- ==================== Settings ==================== -->
   <div id="settings" class="modal hidden">
