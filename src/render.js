@@ -24,6 +24,7 @@
 // same as the old flat polygons did - shadowBlur never runs in the hot loop.
 // ---------------------------------------------------------------------------
 
+import { paintOutfitBack, paintOutfitFront, paintFaceExtras, pupilColor } from './outfits.js';
 import { ARENA, CHARACTERS, ENEMIES, TIER_COLOR } from './data.js';
 import { FX, PROJ_KINDS } from './protocol.js';
 import { paintWeaponShape } from './icons.js';
@@ -415,9 +416,13 @@ function enemySprite(type, elite, hit) {
 }
 
 // ------------------------------------------------------ player painting
-/** A potato body in the character's colour, facing up (aim is drawn live). */
-function paintPotato(g, color, r, hurt) {
+/**
+ * A potato body in the character's colour, facing up (aim is drawn live),
+ * wearing its outfit (outfits.js) when `id` is given.
+ */
+function paintPotato(g, color, r, hurt, id = -1) {
   const col = hurt ? '#ffffff' : color;
+  if (id >= 0) paintOutfitBack(g, id, r);
   g.shadowColor = col; g.shadowBlur = 12 * SPR;
   g.fillStyle = col;
   g.strokeStyle = hurt ? '#c8c8d8' : shade(color, -0.55);
@@ -436,11 +441,12 @@ function paintPotato(g, color, r, hurt) {
     g.beginPath(); g.arc(sx * r, sy * r, sr * r, 0, TAU); g.fill();
   }
   gloss(g, r * 1.05, 0.38);
+  if (id >= 0) paintOutfitFront(g, id, r, blob);
 }
 
 function playerSprite(charId, hurt) {
   const ch = CHARACTERS[charId] || CHARACTERS[0];
-  return sprite(`p${charId}|${hurt ? 1 : 0}`, PLAYER_R * 1.5 + 16, (g) => paintPotato(g, ch.color, PLAYER_R, hurt));
+  return sprite(`p${ch.id}|${hurt ? 1 : 0}`, PLAYER_R * 2.3 + 6, (g) => paintPotato(g, ch.color, PLAYER_R, hurt, ch.id));
 }
 
 const deadSprite = () => sprite('pdead', PLAYER_R * 1.5 + 6, (g) => {
@@ -458,13 +464,13 @@ const deadSprite = () => sprite('pdead', PLAYER_R * 1.5 + 6, (g) => {
 });
 
 /** Face: eyes whose pupils look toward `aim`, on a body of radius r. */
-function paintFace(g, x, y, aim, r, dead = false) {
+function paintFace(g, x, y, aim, r, dead = false, charId = -1) {
   const lx = Math.cos(aim) * r * 0.12, ly = Math.sin(aim) * r * 0.12;
   for (const s of [-1, 1]) {
     const ex = x + s * r * 0.36, ey = y - r * 0.18;
     g.fillStyle = '#ffffff';
     g.beginPath(); g.ellipse(ex, ey, r * 0.24, r * 0.28, 0, 0, TAU); g.fill();
-    g.fillStyle = '#15121c';
+    g.fillStyle = pupilColor(charId);
     g.beginPath(); g.arc(ex + lx, ey + ly, r * 0.13, 0, TAU); g.fill();
     g.fillStyle = '#ffffff';
     g.beginPath(); g.arc(ex + lx - r * 0.04, ey + ly - r * 0.05, r * 0.045, 0, TAU); g.fill();
@@ -472,6 +478,7 @@ function paintFace(g, x, y, aim, r, dead = false) {
   if (!dead) {
     g.strokeStyle = '#15121c'; g.lineWidth = Math.max(1, r * 0.09);
     g.beginPath(); g.arc(x, y + r * 0.22, r * 0.22, 0.25, Math.PI - 0.25); g.stroke();
+    if (charId >= 0) paintFaceExtras(g, charId, x, y, r);
   }
 }
 
@@ -492,9 +499,11 @@ export function renderPortrait(canvas, charId) {
   const g = canvas.getContext('2d');
   const w = canvas.width, h = canvas.height;
   g.clearRect(0, 0, w, h);
-  const s = w / (PLAYER_R * 4.2);
+  // Frame the outfit and the held weapon, not just the body: the hat reaches
+  // ~2.1r up and the weapon ~2.7r to the right.
+  const s = w / (PLAYER_R * 5.2);
   g.save();
-  g.translate(w / 2, h / 2 + PLAYER_R * s * 0.15);
+  g.translate(w / 2 - PLAYER_R * s * 0.55, h / 2 + PLAYER_R * s * 0.4);
   g.scale(s, s);
   // ground shadow
   g.fillStyle = 'rgba(0,0,0,0.35)';
@@ -503,7 +512,7 @@ export function renderPortrait(canvas, charId) {
   const spr = playerSprite(ch.id, false);
   g.drawImage(spr.c, -spr.half, -spr.half, spr.half * 2, spr.half * 2);
   paintWeapon(g, 0, 0, aim, ch.weapon, PLAYER_R);
-  paintFace(g, 0, 0, aim, PLAYER_R);
+  paintFace(g, 0, 0, aim, PLAYER_R, false, ch.id);
   g.restore();
 }
 
@@ -1114,13 +1123,13 @@ export class Renderer {
 
     const y = p.y - bob;
     blit(g, playerSprite(p.char, hurt), p.x, y, lean, 1 + sq, 1 - sq);
-    paintFace(g, p.x, y, p.ang, PLAYER_R);
+    paintFace(g, p.x, y, p.ang, PLAYER_R, false, ch.id);
     paintWeapon(g, p.x, y, p.ang, ch.weapon, PLAYER_R);
     g.globalAlpha = 1;
 
     // health bar + name
     const w = 42;
-    const by = p.y - 29;
+    const by = p.y - 36;   // clear of the tallest hat (outfits.js)
     g.fillStyle = 'rgba(0,0,0,0.65)';
     roundRect(g, p.x - w / 2 - 1, by - 1, w + 2, 7, 3.5); g.fill();
     const hp = Math.max(0, p.hp / p.maxHp);
@@ -1130,9 +1139,9 @@ export class Renderer {
       g.font = `bold ${isMe || watched ? 13 : 12}px system-ui, sans-serif`;
       g.textAlign = 'center';
       g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,0.7)';
-      g.strokeText(name, p.x, p.y - 34);
+      g.strokeText(name, p.x, p.y - 41);
       g.fillStyle = watched ? '#ffc857' : isMe ? '#ffffff' : 'rgba(220,225,240,0.85)';
-      g.fillText(name, p.x, p.y - 34);
+      g.fillText(name, p.x, p.y - 41);
     }
   }
 

@@ -278,6 +278,7 @@ src/
   net.js            PeerJS transport, host + client
   clientstate.js    snapshot buffering, interpolation, prediction & reconciliation
   render.js         canvas 2D; every sprite drawn from primitives, zero assets
+  outfits.js        each character's 2D look (hats, packs, faces), matching the 3D models
   render3d.js       Three.js renderer: arena, models, floating weapons, effects
   assets3d.js       loads assets/*.glb and bakes them into a few draw calls each
   ui.js             DOM panels, driven purely by control messages
